@@ -12,6 +12,7 @@ from wenyi_direct.config import Config
 from wenyi_direct.ingest.models import Chapter, Segment
 from wenyi_direct.llm.providers.fake import FakeClient
 from wenyi_direct.pipeline.direct import AlignmentError, DirectPipeline
+from wenyi_direct.pipeline.types import segment_id
 from wenyi_direct.prompts import (
     CHINESE_FINDING_VALIDATION_SYSTEM,
     CHINESE_READER_SYSTEM,
@@ -294,6 +295,37 @@ def test_audit_id_digest_copy_error_is_recovered_but_unknown_segment_is_rejected
     response["issues"][0]["start_id"] = "ch3:s99:wrongdigest"
     with pytest.raises(AlignmentError, match="unknown stable ID"):
         pipeline._parse_issues(chapter, response, {0})
+
+
+def test_synthetic_speaker_metadata_never_enters_target(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    pipeline = DirectPipeline(config, {}, config_dir=tmp_path)
+    chapter = Chapter(
+        index=0,
+        title="章",
+        segments=[
+            Segment(
+                index=0,
+                source="【話者：黒澤／中文名：黑泽】「待て」",
+            )
+        ],
+    )
+    stable_id = next(iter({
+        segment_id(0, segment): segment.index for segment in chapter.text_segments
+    }))
+    parsed = pipeline._parse_translations(
+        chapter,
+        (0,),
+        {
+            "translations": [
+                {
+                    "id": stable_id,
+                    "target": "【話者：黒澤／中文名：黑泽】「等等」",
+                }
+            ]
+        },
+    )
+    assert parsed == {0: "「等等」"}
 
 
 def test_cli_prepare_and_status_need_no_model_credentials(tmp_path: Path) -> None:

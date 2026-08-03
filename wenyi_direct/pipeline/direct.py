@@ -33,6 +33,14 @@ class AlignmentError(RuntimeError):
     """A structured response omitted, duplicated, or invented stable IDs."""
 
 
+_SPEAKER_METADATA_PREFIX_RE = re.compile(r"^\s*【話者：[^】]*】\s*")
+
+
+def _clean_target_control_metadata(target: str) -> str:
+    """Remove the synthetic speaker hint injected into source-only context."""
+    return _SPEAKER_METADATA_PREFIX_RE.sub("", target, count=1).strip()
+
+
 def _group_contiguous(indexes: Iterable[int]) -> list[tuple[int, ...]]:
     groups: list[list[int]] = []
     for index in sorted(set(indexes)):
@@ -139,6 +147,7 @@ class DirectPipeline:
                 "translated_ids": [],
             }
             store.save_shadow(chapter_index, shadow)
+        self._clean_shadow_control_metadata(store, chapter, shadow)
         store.set_chapter_fields(chapter_index, phase=shadow["phase"], error=None)
         try:
             if shadow["phase"] == "translate":
@@ -168,6 +177,31 @@ class DirectPipeline:
     @staticmethod
     def _save_targets(shadow: dict[str, Any], targets: dict[int, str]) -> None:
         shadow["targets"] = {str(index): target for index, target in targets.items()}
+
+    def _clean_shadow_control_metadata(
+        self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
+    ) -> None:
+        targets = self._targets(shadow)
+        cleaned = {
+            index: _clean_target_control_metadata(target)
+            for index, target in targets.items()
+            if _clean_target_control_metadata(target) != target
+        }
+        if not cleaned:
+            return
+        self._archive_targets(
+            store,
+            chapter,
+            "control_metadata_cleanup",
+            cleaned,
+            previous=targets,
+        )
+        targets.update(cleaned)
+        self._save_targets(shadow, targets)
+        store.save_shadow(chapter.index, shadow)
+        store.log_event(
+            "control_metadata_cleanup", chapter=chapter.index, count=len(cleaned)
+        )
 
     def _translate_chapter(
         self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
@@ -537,7 +571,7 @@ class DirectPipeline:
             if not isinstance(item, dict):
                 raise AlignmentError("translation item must be an object")
             stable_id = str(item.get("id", ""))
-            target = str(item.get("target", "")).strip()
+            target = _clean_target_control_metadata(str(item.get("target", "")))
             if stable_id not in expected or stable_id in seen or not target:
                 raise AlignmentError(f"invalid translation item for id {stable_id!r}")
             seen.add(stable_id)

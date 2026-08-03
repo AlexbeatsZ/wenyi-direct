@@ -37,6 +37,7 @@ EVENT_LABELS = {
     "translation_window_completed": "直接翻译窗口完成",
     "chapter_promoted": "章节通过全部质量门",
     "chapter_failed": "章节处理失败",
+    "control_metadata_cleanup": "说话者控制标签已清理",
     "factual_audit": "事实审查完成",
     "chinese_reader_audit": "纯中文阅读审查完成",
     "chinese_finding_validation": "中文问题原文验证完成",
