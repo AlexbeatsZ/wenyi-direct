@@ -149,6 +149,14 @@ def _handler(messages, _tier, _json_mode):
         return json.dumps({"issues": issues, "term_candidates": candidates}, ensure_ascii=False)
     if system == CHINESE_READER_SYSTEM:
         row = next((row for row in payload["text"] if row["text"] == "他到来了。"), None)
+        noel = next(
+            (
+                row
+                for row in payload["text"]
+                if row["text"] == "诺艾尔的低语消失在轰鸣中。"
+            ),
+            None,
+        )
         issues = []
         if row is not None and row["audit"]:
             issues.append(
@@ -158,6 +166,16 @@ def _handler(messages, _tier, _json_mode):
                     "type": "unnatural",
                     "detail": "人物动作叙述过度书面",
                     "evidence": "他到来了",
+                }
+            )
+        if noel is not None and noel["audit"]:
+            issues.append(
+                {
+                    "start_id": noel["id"],
+                    "end_id": noel["id"],
+                    "type": "unnatural",
+                    "detail": "消失在轰鸣中搭配生硬",
+                    "evidence": "低语消失在轰鸣中",
                 }
             )
         return json.dumps({"issues": issues}, ensure_ascii=False)
@@ -189,7 +207,11 @@ def _handler(messages, _tier, _json_mode):
             if issue_type == "mistranslation":
                 target = "亮了。"
             elif issue_type == "unnatural":
-                target = "他来了。"
+                target = (
+                    "他来了。"
+                    if row["source"] == "彼が来た。"
+                    else "诺艾尔的低语被轰鸣声淹没了。"
+                )
             translations.append({"id": item["id"], "target": target})
         return json.dumps({"translations": translations}, ensure_ascii=False)
     if system == FIDELITY_SYSTEM:
@@ -210,7 +232,7 @@ def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) ->
     assert [segment.target for segment in chapter.text_segments] == [
         "他来了。",
         "亮了。",
-        "诺艾尔的低语消失在轰鸣中。",
+        "诺艾尔的低语被轰鸣声淹没了。",
     ]
     manifest = store.load_manifest()
     assert manifest["chapters"][0]["status"] == "done"
@@ -230,6 +252,16 @@ def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) ->
         assert source_text not in serialized
     all_calls = json.dumps(fake.calls, ensure_ascii=False)
     assert "未来の秘密。" not in all_calls
+
+    language_repair_calls = [
+        call
+        for call in fake.calls
+        if call["messages"][0]["content"] == REPAIR_SYSTEM
+        and _payload(call["messages"])["issues"][0]["type"] == "unnatural"
+    ]
+    assert len(language_repair_calls) == 1
+    language_payload = _payload(language_repair_calls[0]["messages"])
+    assert len(language_payload["required_output"]["translations"]) == 2
 
     calls_before_second_chapter = len(fake.calls)
     pipeline.run(source, chapters={1})

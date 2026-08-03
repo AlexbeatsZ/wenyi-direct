@@ -371,7 +371,7 @@ class DirectPipeline:
                 {"input_ref": input_ref, "issues": parsed},
             )
 
-        accepted: list[dict] = []
+        accepted_batches: list[tuple[TranslationWindow, list[dict]]] = []
         for window, batch in reader_batches:
             if not batch:
                 continue
@@ -391,6 +391,7 @@ class DirectPipeline:
                 stage="chinese_finding_validation",
             )
             results = self._parse_reader_validations(chapter, response, tagged)
+            batch_accepted: list[dict] = []
             for issue, result in zip(tagged, results, strict=True):
                 store.record_audit(
                     chapter.index,
@@ -398,11 +399,28 @@ class DirectPipeline:
                     {"input_ref": input_ref, "reader_issue": issue, "result": result},
                 )
                 if result["safe_to_repair"]:
-                    accepted.append(result)
+                    batch_accepted.append(result)
+            if batch_accepted:
+                accepted_batches.append((window, batch_accepted))
 
-        for region in self.repair_planner.plan(accepted, len(chapter.segments)):
+        for window, batch in accepted_batches:
+            regions = self.repair_planner.plan(batch, len(chapter.segments))
+            write_indexes = tuple(
+                sorted({index for region in regions for index in region.indexes})
+            )
+            combined = RepairRegion(
+                write_indexes[0],
+                write_indexes[-1],
+                tuple(issue for region in regions for issue in region.issues),
+            )
             targets = self._repair_and_validate(
-                store, chapter, targets, region, "language_repair"
+                store,
+                chapter,
+                targets,
+                combined,
+                "language_repair",
+                read_indexes=window.read_indexes,
+                write_indexes=write_indexes,
             )
             self._save_targets(shadow, targets)
             store.save_shadow(chapter.index, shadow)
@@ -417,13 +435,16 @@ class DirectPipeline:
         targets: dict[int, str],
         region: RepairRegion,
         stage: str,
+        *,
+        read_indexes: tuple[int, ...] | None = None,
+        write_indexes: tuple[int, ...] | None = None,
     ) -> dict[int, str]:
-        write_indexes = tuple(
+        write_indexes = write_indexes or tuple(
             index for index in region.indexes if chapter.segments[index].source.strip()
         )
         if not write_indexes:
             return targets
-        read_indexes = self._read_scope_for_range(
+        read_indexes = read_indexes or self._read_scope_for_range(
             chapter, write_indexes[0], write_indexes[-1]
         )
         feedback: list[dict] = []
