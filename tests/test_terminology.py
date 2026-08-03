@@ -67,6 +67,10 @@ def test_groups_status_range_pronoun_and_preferred_visibility(tmp_path: Path) ->
         {"source": "黒騎士", "target": "黑骑士", "pronoun": "neutral"}
     ]
     assert loaded.visible(4, "黒騎士")["preferred_terms"] == []
+    assert loaded.visible(2, "彼女は走り出した。") == {
+        "hard_terms": [],
+        "preferred_terms": [],
+    }
 
 
 def test_group_members_must_contain_both_anchors() -> None:
@@ -124,6 +128,26 @@ def test_discovery_auto_activates_soft_rule_but_conflict_becomes_candidate(
     assert loaded.set_status("ノエル", "rejected", target="诺艾尔") == 1
     assert loaded.set_status("ノエル", "active", target="诺埃尔") == 1
     assert loaded.visible(2, "ノエル")["preferred_terms"][0]["target"] == "诺埃尔"
+
+
+def test_discovery_accepts_a_stable_ordinary_noun_phrase(tmp_path: Path) -> None:
+    store = TerminologyStore(tmp_path / "terminology.yaml")
+    added = store.add_discoveries(
+        3,
+        [{"source": "焼き鳥屋", "target": "烤鸡串店"}],
+        "今日も焼き鳥屋に寄った。",
+        "今天也去了烤鸡串店。",
+    )
+
+    assert len(added) == 1
+    assert added[0].model_dump(exclude_none=True) == {
+        "source": "焼き鳥屋",
+        "target": "烤鸡串店",
+        "mode": "preferred",
+        "status": "active",
+        "valid_from": 3,
+    }
+    assert "普通名词短语" in FACTUAL_AUDIT_SYSTEM
 
 
 def _minimal_config(tmp_path: Path) -> Config:

@@ -47,7 +47,10 @@ a substitute for nearby source evidence.
 
 `chinese_reader_messages()` constructs its payload only from final Chinese target
 strings and stable IDs. It has no parameter for source text, glossary, analysis, or
-source metadata. This makes the requested reading order mechanical:
+source metadata. Its system prompt explicitly frames the call as pre-release quality
+acceptance of a machine-translated manuscript, so the reviewer actively looks for
+literal but invalid Chinese instead of reading as an ordinary literary critic. This
+makes the requested reading order mechanical:
 
 1. detect actual Chinese reading problems;
 2. for each finding, open a separate source-aware validation request;
@@ -74,9 +77,15 @@ priority over nested shorter matches.
 
 `mode` and `status` are independent: hard rules are mechanically enforced while
 preferred rules are suggestions; active rules participate while candidate/rejected
-rules never enter prompts. The factual audit may discover stable names at no extra
-model-call cost. A non-conflicting discovery becomes `active + preferred`; a conflict
+rules never enter prompts. The factual audit may discover stable names, setting
+expressions, and ordinary noun phrases such as a repeatedly referenced shop when they
+serve a stable translation function, at no extra model-call cost. Frequency alone is
+not enough. A non-conflicting discovery becomes `active + preferred`; a conflict
 becomes `candidate`, and an exact rejected mapping is not proposed again.
+
+Pronoun guidance is deliberately term-local. It enters knowledge when that term's
+source expression is present in the current read scope and does not create an active
+character, speaker, or cross-window coreference tracker.
 
 Hard terminology is deterministically checked after repair and again before Formal
 promotion. Repair and fidelity-validation prompts receive the same current

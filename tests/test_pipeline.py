@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 from wenyi_direct.assemble.writer import assemble
 from wenyi_direct.cli import app
 from wenyi_direct.config import Config
+from wenyi_direct.ingest.models import Chapter, Segment
 from wenyi_direct.llm.providers.fake import FakeClient
 from wenyi_direct.pipeline.direct import DirectPipeline
 from wenyi_direct.prompts import (
@@ -18,6 +19,7 @@ from wenyi_direct.prompts import (
     FIDELITY_SYSTEM,
     REPAIR_SYSTEM,
     TRANSLATION_SYSTEM,
+    chinese_reader_messages,
 )
 from wenyi_direct.validate import validate_epub
 
@@ -75,6 +77,22 @@ def _write_book(path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def test_chinese_reader_has_translation_acceptance_motive_but_no_source() -> None:
+    chapter = Chapter(
+        index=0,
+        title="原文章名",
+        segments=[Segment(index=0, source="光った。", target="闪光了。")],
+    )
+    messages = chinese_reader_messages(chapter, {0: "闪光了。"})
+    serialized = json.dumps(messages, ensure_ascii=False)
+
+    assert "机器翻译文稿上线前的中文阅读验收" in messages[0]["content"]
+    assert "短句或低语" in messages[0]["content"]
+    assert "闪光了。" in serialized
+    assert "光った。" not in serialized
+    assert "原文章名" not in serialized
 
 
 def _handler(messages, _tier, _json_mode):

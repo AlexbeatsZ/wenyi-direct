@@ -21,10 +21,13 @@ No future chapter is required. A bounded raw tail from completed chapters suppli
 past-only context as a serial work progresses.
 
 Terminology supports translation-sharing groups plus per-term `mode`, `status`,
-chapter range, and optional pronoun guidance. Factual audit can discover stable names
-without another model call: non-conflicting discoveries become soft active
-preferences, conflicts remain inactive candidates, and rejected mappings stay out.
-Hard rules are checked mechanically during repair and before final promotion.
+chapter range, and optional pronoun guidance. Factual audit can discover stable names,
+setting expressions, and ordinary noun phrases that repeatedly need one stable
+translation without another model call. Non-conflicting discoveries become soft
+active preferences, conflicts remain inactive candidates, and rejected mappings stay
+out. Pronoun guidance remains local to a retrieved term; the pipeline does not infer
+or persist an active speaker/referent across later windows. Hard rules are checked
+mechanically during repair and before final promotion.
 
 ## Supported model transports
 
