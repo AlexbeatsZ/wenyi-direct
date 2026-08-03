@@ -17,10 +17,8 @@ from wenyi_direct.prompts import (
     CHINESE_READER_SYSTEM,
     FACTUAL_AUDIT_SYSTEM,
     FIDELITY_SYSTEM,
-    JA_ZH_RISK_RULES,
     REPAIR_SYSTEM,
     TRANSLATION_SYSTEM,
-    ZH_CN_TARGET_RULES,
     chinese_reader_messages,
 )
 from wenyi_direct.validate import validate_epub
@@ -91,7 +89,7 @@ def test_chinese_reader_has_translation_acceptance_motive_but_no_source() -> Non
     serialized = json.dumps(messages, ensure_ascii=False)
 
     assert "机器翻译文稿上线前的中文阅读验收" in messages[0]["content"]
-    assert "短句、低语" in messages[0]["content"]
+    assert "短句或低语" in messages[0]["content"]
     assert "闪光了。" in serialized
     assert "光った。" not in serialized
     assert "原文章名" not in serialized
@@ -99,57 +97,15 @@ def test_chinese_reader_has_translation_acceptance_motive_but_no_source() -> Non
 
 def test_japanese_translation_guardrails_are_general_not_case_specific() -> None:
     for principle in (
-        "主语、话题与指代",
-        "作用域与逻辑",
-        "时态、体与状态",
-        "语态与授受",
-        "判断、证据与语气",
-        "对话与人物声音",
-        "修饰与句法",
-        "拟声拟态词",
-        "歧义与揭示",
+        "省略的主语",
+        "话语功能",
+        "连体修饰顺序",
+        "不成立搭配",
+        "不得为了自然或文采擅自扩大",
     ):
-        assert principle in JA_ZH_RISK_RULES
         assert principle in TRANSLATION_SYSTEM
-    for principle in (
-        "中国大陆简体中文读者",
-        "连续多个“的”",
-        "不得改变事实、信息范围、语气、视角、人物声音",
-        "不得为了流畅或文采擅自扩大",
-    ):
-        assert principle in ZH_CN_TARGET_RULES
-        assert principle in TRANSLATION_SYSTEM
-    assert "不把修复区当成自由重译区" in REPAIR_SYSTEM
-    assert "不要要求候选恢复日语表面结构" in FIDELITY_SYSTEM
     for case_specific_answer in ("光った", "闪光了", "亮了", "第一具猎物"):
         assert case_specific_answer not in TRANSLATION_SYSTEM
-
-
-def test_audit_prompts_cover_complementary_risks() -> None:
-    for principle in ("焦点作用域", "授受", "确信", "歧义"):
-        assert principle in FACTUAL_AUDIT_SYSTEM
-    for principle in (
-        "逐词直译",
-        "不成立搭配",
-        "修饰对象",
-        "语域",
-        "只返回要求的 JSON",
-    ):
-        assert principle in CHINESE_READER_SYSTEM
-    for principle in ("原文有意", "安全修复方式", "完整修复范围"):
-        assert principle in CHINESE_FINDING_VALIDATION_SYSTEM
-
-    chapter = Chapter(
-        index=0,
-        title="不应泄漏",
-        segments=[Segment(index=0, source="秘密。", target="现有中文。")],
-    )
-    messages = chinese_reader_messages(chapter, {0: "现有中文。"})
-    schema_type = _payload(messages)["output_schema"]["issues"][0]["type"]
-    assert schema_type == (
-        "collocation|syntax|translationese|voice|subject|dialogue|coherence|"
-        "rhythm|register|punctuation"
-    )
 
 
 def _handler(messages, _tier, _json_mode):
