@@ -61,6 +61,8 @@ format. Outputs: EPUB, TXT, Markdown, HTML, or JSON.
 See [docs/architecture.md](docs/architecture.md) and
 [docs/providers.md](docs/providers.md) for the precise boundaries and configuration.
 The [format reference](docs/formats.md) documents JSON/game-script interchange.
+Sanitized methods, compact results, and selected excerpts from model comparisons are
+published in [experiments/](experiments/README.md).
 
 ## Provenance
 

@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "chapter": 0,
+  "segment_count": 89,
+  "source_visible_to_reader_models": false,
+  "runs": [
+    {
+      "id": "E02-A",
+      "model": "Gemini 3.1 Pro High",
+      "prompt": "baseline_reader",
+      "issue_count": 2,
+      "segments": [49, 50, 51],
+      "found_s6": false
+    },
+    {
+      "id": "E02-B",
+      "model": "Gemini 3.1 Pro High",
+      "prompt": "baseline_reader",
+      "issue_count": 5,
+      "segments": [1, 44, 45, 46, 47, 49, 51, 75],
+      "found_s6": false
+    },
+    {
+      "id": "E03-A",
+      "model": "Gemini 3.1 Pro High",
+      "prompt": "translation_aware_reader",
+      "issue_count": 8,
+      "segments": [1, 6, 27, 28, 49, 51, 56, 71],
+      "found_s6": true,
+      "s6_detail": "Direct-translation wording is unnatural as immediate Chinese speech."
+    },
+    {
+      "id": "E03-B",
+      "model": "DeepSeek V4 Pro High thinking",
+      "prompt": "translation_aware_reader",
+      "issue_count": 2,
+      "segments": [27, 49],
+      "found_s6": false
+    },
+    {
+      "id": "E06-A",
+      "model": "Gemini 3.6 Flash Medium",
+      "prompt": "translation_aware_reader",
+      "issue_count": 5,
+      "segments": [1, 27, 49, 51, 71],
+      "found_s6": false
+    },
+    {
+      "id": "E06-B",
+      "model": "DeepSeek V4 Flash High thinking",
+      "prompt": "translation_aware_reader",
+      "issue_count": 16,
+      "segments": [1, 19, 27, 28, 35, 38, 49, 51, 55, 56, 60, 67, 69, 75, 76, 78],
+      "found_s6": false
+    },
+    {
+      "id": "E06-C",
+      "model": "Codex GPT-5.6 Sol High",
+      "prompt": "translation_aware_reader",
+      "issue_count": 19,
+      "segments": [1, 15, 19, 23, 27, 28, 33, 37, 38, 47, 49, 51, 56, 63, 64, 67, 68, 71, 74, 75, 78, 86],
+      "found_s6": false
+    },
+    {
+      "id": "E07",
+      "model": "Gemini 3.1 Pro High",
+      "prompt": "release_acceptance_reader",
+      "issue_count": 4,
+      "segments": [1, 27, 49, 51],
+      "found_s6": false
+    }
+  ],
+  "notable_intersections": {
+    "E06_all_three": [1, 27, 49, 51],
+    "E06_all_three_missed": [6],
+    "E06_sol_and_deepseek_only": [19, 28, 38, 56, 67, 75, 78],
+    "E06_gemini_and_sol_only": [71]
+  },
+  "interpretation": [
+    "Prompt framing changes recall probability but does not guarantee detection.",
+    "More findings are not automatically better; source-aware validation rejected the s1 metaphor complaint.",
+    "Gemini 3.1 Pro was the only tested source-free reader sample that detected s6."
+  ]
+}

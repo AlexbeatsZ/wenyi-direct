@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "chapter": 0,
+  "experiments": [
+    {
+      "id": "E04",
+      "name": "Source-aware validation and repair for s6",
+      "validator": "Codex GPT-5.6 Sol High",
+      "safe_to_repair": true,
+      "repair_segments": [6],
+      "required_behavior": "A short, colloquial observation of a light below; do not reveal the later stun-grenade explanation.",
+      "before": "闪光了",
+      "after": "亮了",
+      "fidelity_valid": true
+    },
+    {
+      "id": "E05-A",
+      "name": "Automatic two-segment write expansion",
+      "repair_context_segments": 2,
+      "reported_problem_segments": [49, 50, 51],
+      "written_segments": [47, 48, 49, 50, 51, 52, 53],
+      "change_count": 7,
+      "finding": "Read context was incorrectly converted into writable scope."
+    },
+    {
+      "id": "E05-B",
+      "name": "Model-validated precise write scope",
+      "repair_context_segments": 0,
+      "accepted_changed_segments": [44, 47, 49, 51, 75],
+      "change_count": 5,
+      "fidelity_retry_observed": true,
+      "finding": "A failed s75 repair remained shadow-only; the second candidate passed fidelity validation."
+    },
+    {
+      "id": "E08",
+      "name": "Stable ordinary-noun phrase discovery",
+      "reviewer_output": {
+        "source": "焼き鳥屋",
+        "target": "烤鸡串店"
+      },
+      "stored_rule": {
+        "mode": "preferred",
+        "status": "active"
+      },
+      "extra_model_call_added": false
+    }
+  ],
+  "terminology_migration": {
+    "groups": ["yoshikawa_noel", "black_hawk"],
+    "term_count": 8,
+    "manual_adjustment": "Person-name rules were changed from hard to preferred because speaker labels are read-only metadata and must not be copied into dialogue.",
+    "hard_violation_count_on_existing_baseline": 0
+  },
+  "term_schema": {
+    "group": ["source_anchor", "target_anchor"],
+    "term": ["source", "target", "group_id", "mode", "status", "valid_from", "valid_to", "pronoun"]
+  }
+}
