@@ -162,15 +162,21 @@ def _handler(messages, _tier, _json_mode):
             )
         return json.dumps({"issues": issues}, ensure_ascii=False)
     if system == CHINESE_FINDING_VALIDATION_SYSTEM:
-        issue = payload["reader_issue"]
+        issues = payload["reader_issues"]
         return json.dumps(
             {
-                "safe_to_repair": True,
-                "repair_start_id": issue["start_id"],
-                "repair_end_id": issue["end_id"],
-                "required_meaning": "他来了",
-                "constraints": ["保持过去时事件"],
-                "reason": "可在不改变事实的前提下口语化",
+                "results": [
+                    {
+                        "finding_id": issue["finding_id"],
+                        "safe_to_repair": True,
+                        "repair_start_id": issue["start_id"],
+                        "repair_end_id": issue["end_id"],
+                        "required_meaning": "他来了",
+                        "constraints": ["保持过去时事件"],
+                        "reason": "可在不改变事实的前提下口语化",
+                    }
+                    for issue in issues
+                ]
             },
             ensure_ascii=False,
         )

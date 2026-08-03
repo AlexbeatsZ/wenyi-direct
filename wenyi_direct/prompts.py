@@ -173,11 +173,11 @@ def chinese_reader_messages(
 def chinese_finding_validation_messages(
     chapter: Chapter,
     targets: dict[int, str],
-    issue: dict,
+    issues: list[dict],
     read_indexes: tuple[int, ...],
 ) -> list[dict[str, str]]:
     payload = {
-        "reader_issue": issue,
+        "reader_issues": issues,
         "segments": [
             {
                 "id": segment_id(chapter.index, chapter.segments[index]),
@@ -187,19 +187,24 @@ def chinese_finding_validation_messages(
             for index in read_indexes
         ],
         "output_schema": {
-            "safe_to_repair": True,
-            "repair_start_id": "完整修复起点",
-            "repair_end_id": "完整修复终点",
-            "required_meaning": "必须保留的原意",
-            "constraints": ["修复约束"],
-            "reason": "判断依据",
+            "results": [
+                {
+                    "finding_id": "必须原样返回 reader_issues.finding_id",
+                    "safe_to_repair": True,
+                    "repair_start_id": "完整修复起点；不可修复时可省略",
+                    "repair_end_id": "完整修复终点；不可修复时可省略",
+                    "required_meaning": "必须保留的原意",
+                    "constraints": ["修复约束"],
+                    "reason": "判断依据",
+                }
+            ]
         },
     }
     return [
         {"role": "system", "content": CHINESE_FINDING_VALIDATION_SYSTEM},
         {
             "role": "user",
-            "content": "验证这一阅读问题。只返回 JSON。\n"
+            "content": "逐条验证这些阅读问题，每个 finding_id 恰好返回一个结果。只返回 JSON。\n"
             + json.dumps(payload, ensure_ascii=False),
         },
     ]

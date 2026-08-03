@@ -350,7 +350,7 @@ class DirectPipeline:
         self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
     ) -> None:
         targets = self._targets(shadow)
-        reader_issues: list[dict] = []
+        reader_batches: list[tuple[TranslationWindow, list[dict]]] = []
         for window in self.window_planner.plan(chapter):
             messages = chinese_reader_messages(
                 chapter, targets, window.read_indexes, window.write_indexes
@@ -364,7 +364,7 @@ class DirectPipeline:
                 stage="chinese_reader_audit",
             )
             parsed = self._parse_issues(chapter, response, set(window.write_indexes))
-            reader_issues.extend(parsed)
+            reader_batches.append((window, parsed))
             store.record_audit(
                 chapter.index,
                 "chinese_reader_audit",
@@ -372,10 +372,15 @@ class DirectPipeline:
             )
 
         accepted: list[dict] = []
-        for issue in reader_issues:
-            read_indexes = self._read_scope_for_range(chapter, issue["start"], issue["end"])
+        for window, batch in reader_batches:
+            if not batch:
+                continue
+            tagged = [
+                {**issue, "finding_id": f"f{index}"}
+                for index, issue in enumerate(batch)
+            ]
             messages = chinese_finding_validation_messages(
-                chapter, targets, issue, read_indexes
+                chapter, targets, tagged, window.read_indexes
             )
             input_ref = store.save_translation_input(
                 {"stage": "chinese_finding_validation", "messages": messages}
@@ -385,14 +390,15 @@ class DirectPipeline:
                 tier=self.config.pipeline.validation_tier,
                 stage="chinese_finding_validation",
             )
-            result = self._parse_reader_validation(chapter, response, issue)
-            store.record_audit(
-                chapter.index,
-                "chinese_finding_validation",
-                {"input_ref": input_ref, "reader_issue": issue, "result": result},
-            )
-            if result["safe_to_repair"]:
-                accepted.append(result)
+            results = self._parse_reader_validations(chapter, response, tagged)
+            for issue, result in zip(tagged, results, strict=True):
+                store.record_audit(
+                    chapter.index,
+                    "chinese_finding_validation",
+                    {"input_ref": input_ref, "reader_issue": issue, "result": result},
+                )
+                if result["safe_to_repair"]:
+                    accepted.append(result)
 
         for region in self.repair_planner.plan(accepted, len(chapter.segments)):
             targets = self._repair_and_validate(
@@ -637,10 +643,32 @@ class DirectPipeline:
                 return index
         raise KeyError(stable_id)
 
+    def _parse_reader_validations(
+        self, chapter: Chapter, response: Any, original_issues: list[dict]
+    ) -> list[dict]:
+        if not isinstance(response, dict) or not isinstance(response.get("results"), list):
+            raise AlignmentError("reader validation response is malformed")
+        expected = {str(issue["finding_id"]): issue for issue in original_issues}
+        received: dict[str, dict] = {}
+        for result in response["results"]:
+            if not isinstance(result, dict):
+                raise AlignmentError("reader validation result is malformed")
+            finding_id = str(result.get("finding_id", ""))
+            if finding_id not in expected or finding_id in received:
+                raise AlignmentError(
+                    f"reader validation returned unknown or duplicate finding_id {finding_id!r}"
+                )
+            received[finding_id] = self._parse_reader_validation(
+                chapter, result, expected[finding_id]
+            )
+        if set(received) != set(expected):
+            raise AlignmentError("reader validation omitted one or more finding IDs")
+        return [received[str(issue["finding_id"])] for issue in original_issues]
+
     def _parse_reader_validation(
         self, chapter: Chapter, response: Any, original_issue: dict
     ) -> dict:
-        if not isinstance(response, dict) or not isinstance(response.get("safe_to_repair"), bool):
+        if not isinstance(response.get("safe_to_repair"), bool):
             raise AlignmentError("reader validation response is malformed")
         result = {**original_issue, **response}
         if not response["safe_to_repair"]:
