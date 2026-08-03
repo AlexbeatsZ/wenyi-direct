@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from ..config import Config, LLMConfig
 from .base import LLMClient
+from .policy_fallback import ContentPolicyFallbackClient
+
+_STAGE_ROLES = ("translate", "factual_audit", "chinese_audit", "repair", "validation")
 
 
 def build_client(config: Config, role: str = "translate") -> LLMClient:
     provider_name = getattr(config.roles, role)
-    return build_client_from_llm(config.providers[provider_name])
+    primary = build_client_from_llm(config.providers[provider_name])
+    fallback_name = config.roles.content_policy_fallback
+    if fallback_name is None:
+        return primary
+    fallback = build_client_from_llm(config.providers[fallback_name])
+    return ContentPolicyFallbackClient(primary, fallback)
 
 
 def build_clients(config: Config) -> dict[str, LLMClient]:
@@ -17,10 +25,20 @@ def build_clients(config: Config) -> dict[str, LLMClient]:
         name: build_client_from_llm(provider_config)
         for name, provider_config in config.providers.items()
     }
-    return {
-        role: named[provider_name]
-        for role, provider_name in config.roles.model_dump().items()
-    }
+    fallback_name = config.roles.content_policy_fallback
+    fallback = named[fallback_name] if fallback_name is not None else None
+    wrapped: dict[tuple[int, int], LLMClient] = {}
+    result: dict[str, LLMClient] = {}
+    for role in _STAGE_ROLES:
+        primary = named[getattr(config.roles, role)]
+        if fallback is None:
+            result[role] = primary
+            continue
+        key = (id(primary), id(fallback))
+        if key not in wrapped:
+            wrapped[key] = ContentPolicyFallbackClient(primary, fallback)
+        result[role] = wrapped[key]
+    return result
 
 
 def build_client_from_llm(llm: LLMConfig) -> LLMClient:

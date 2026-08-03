@@ -4,7 +4,12 @@ import json
 import subprocess
 from types import SimpleNamespace
 
-from wenyi_direct.config import LLMConfig, TierConfig
+import pytest
+
+from wenyi_direct.config import Config, LLMConfig, TierConfig
+from wenyi_direct.llm.base import ContentPolicyError, LLMClient
+from wenyi_direct.llm.factory import build_clients
+from wenyi_direct.llm.policy_fallback import ContentPolicyFallbackClient
 from wenyi_direct.llm.providers.agy import AgyClient
 from wenyi_direct.llm.providers.anthropic_compatible import (
     AnthropicCompatibleClient,
@@ -139,3 +144,68 @@ def test_openai_compatible_chat_completions_request() -> None:
     assert captured["response_format"] == {"type": "json_object"}
     assert captured["extra_body"]["temperature"] == 0.2
     assert captured["max_tokens"] == 500
+
+
+class _ResultClient(LLMClient):
+    def __init__(self, result: str | Exception) -> None:
+        super().__init__()
+        self.result = result
+        self.calls = 0
+
+    def complete(self, messages, **kwargs):
+        self.calls += 1
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def test_policy_fallback_only_handles_explicit_content_refusal() -> None:
+    primary = _ResultClient(ContentPolicyError("refused"))
+    fallback = _ResultClient('{"ok":true}')
+    client = ContentPolicyFallbackClient(primary, fallback)
+
+    assert json.loads(client.complete([], json_mode=True, stage="translate")) == {"ok": True}
+    assert primary.calls == 1
+    assert fallback.calls == 1
+    assert client.usage_summary()["content_policy_fallback_events"] == [
+        {"stage": "translate", "reason": "refused"}
+    ]
+
+    runtime_primary = _ResultClient(RuntimeError("quota"))
+    untouched_fallback = _ResultClient('{"ok":true}')
+    runtime_client = ContentPolicyFallbackClient(runtime_primary, untouched_fallback)
+    with pytest.raises(RuntimeError, match="quota"):
+        runtime_client.complete([])
+    assert untouched_fallback.calls == 0
+
+
+def test_factory_reuses_one_policy_fallback_wrapper(monkeypatch) -> None:
+    config = Config.model_validate(
+        {
+            "providers": {
+                "gemini": {"provider": "fake"},
+                "deepseek": {"provider": "fake"},
+            },
+            "roles": {
+                "translate": "gemini",
+                "factual_audit": "gemini",
+                "chinese_audit": "gemini",
+                "repair": "gemini",
+                "validation": "gemini",
+                "content_policy_fallback": "deepseek",
+            },
+        }
+    )
+    built = iter([_ResultClient("primary"), _ResultClient("fallback")])
+    monkeypatch.setattr(
+        "wenyi_direct.llm.factory.build_client_from_llm", lambda _config: next(built)
+    )
+    clients = build_clients(config)
+    assert set(clients) == {
+        "translate",
+        "factual_audit",
+        "chinese_audit",
+        "repair",
+        "validation",
+    }
+    assert len({id(client) for client in clients.values()}) == 1

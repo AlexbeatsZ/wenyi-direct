@@ -4,6 +4,11 @@ Logical roles (`translate`, `factual_audit`, `chinese_audit`, `repair`, and
 `validation`) refer to named providers. Multiple roles may share one constructed
 client, or use different transports.
 
+An optional `roles.content_policy_fallback` names one provider used only when the
+selected stage provider raises an explicit content-policy refusal. Quota errors,
+timeouts, malformed JSON, alignment failures, and ordinary runtime errors do not
+switch providers.
+
 ## Codex CLI
 
 ```yaml

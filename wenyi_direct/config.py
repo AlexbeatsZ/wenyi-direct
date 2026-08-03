@@ -44,6 +44,7 @@ class ModelRoles(BaseModel):
     chinese_audit: str = "default"
     repair: str = "default"
     validation: str = "default"
+    content_policy_fallback: str | None = None
 
 
 class WindowConfig(BaseModel):
@@ -116,6 +117,8 @@ class Config(BaseModel):
         if not self.providers:
             raise ValueError("providers must define at least one model provider")
         for role, provider_name in self.roles.model_dump().items():
+            if provider_name is None:
+                continue
             if provider_name not in self.providers:
                 raise ValueError(f"roles.{role} references unknown provider {provider_name!r}")
         return self

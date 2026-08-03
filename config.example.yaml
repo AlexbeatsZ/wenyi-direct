@@ -35,6 +35,8 @@ roles:
   chinese_audit: sol
   repair: sol
   validation: sol
+  # Optional: used only after an explicit provider content-policy refusal.
+  # content_policy_fallback: api
 
 window:
   max_read_chars: 60000
