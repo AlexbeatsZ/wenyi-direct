@@ -110,8 +110,12 @@ class DirectPipeline:
             if chapters is not None:
                 pending = [index for index in pending if index in chapters]
             for chapter_index in pending:
-                self._run_chapter(store, chapter_index)
-            self._save_usage(store)
+                try:
+                    self._run_chapter(store, chapter_index)
+                finally:
+                    # Keep the live monitor useful during long books and retain
+                    # provider/fallback evidence even when a chapter fails.
+                    self._save_usage(store)
         return store
 
     def _run_chapter(self, store: RunStore, chapter_index: int) -> None:

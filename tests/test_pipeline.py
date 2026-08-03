@@ -264,6 +264,8 @@ def test_failed_repair_never_changes_formal_chapter(tmp_path: Path) -> None:
     shadow = pipeline.store_for(source).load_shadow(0)
     assert shadow is not None
     assert shadow["targets"]["1"] == "闪光了。"
+    usage = json.loads(Path(pipeline.store_for(source).usage_path).read_text(encoding="utf-8"))
+    assert usage["providers"]
 
 
 def test_cli_prepare_and_status_need_no_model_credentials(tmp_path: Path) -> None:
