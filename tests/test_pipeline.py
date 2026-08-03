@@ -292,6 +292,10 @@ def test_audit_id_digest_copy_error_is_recovered_but_unknown_segment_is_rejected
     parsed = pipeline._parse_issues(chapter, response, {0})
     assert parsed[0]["start"] == 0
 
+    response["issues"][0]["start_id"] = "ch3:s0"
+    parsed = pipeline._parse_issues(chapter, response, {0})
+    assert parsed[0]["start"] == 0
+
     response["issues"][0]["start_id"] = "ch3:s99:wrongdigest"
     with pytest.raises(AlignmentError, match="unknown stable ID"):
         pipeline._parse_issues(chapter, response, {0})

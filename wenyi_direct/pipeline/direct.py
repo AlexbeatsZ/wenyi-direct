@@ -628,7 +628,9 @@ class DirectPipeline:
         stable_id = str(value)
         if stable_id in id_map:
             return id_map[stable_id]
-        match = re.fullmatch(r"ch(\d+):s(\d+):[0-9A-Za-z_-]+", stable_id)
+        match = re.fullmatch(
+            r"ch(\d+):s(\d+)(?::[0-9A-Za-z_-]+)?", stable_id
+        )
         if match and int(match.group(1)) == chapter.index:
             index = int(match.group(2))
             if any(segment.index == index for segment in chapter.text_segments):
