@@ -66,9 +66,8 @@ def test_agy_uses_fresh_print_plan_request(tmp_path, monkeypatch) -> None:
     assert args[args.index("--mode") + 1] == "plan"
     assert "--print" in args
     assert "--print-timeout" in args
-    assert args[-1] == "--print"
-    assert "hello" in captured["input"]
-    assert captured["input"].endswith("explanatory text.")
+    assert "hello" in args[-1]
+    assert args[-1].endswith("explanatory text.")
 
 
 def test_anthropic_messages_wire_format(monkeypatch) -> None:
