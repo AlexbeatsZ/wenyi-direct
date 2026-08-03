@@ -11,7 +11,7 @@ from wenyi_direct.cli import app
 from wenyi_direct.config import Config
 from wenyi_direct.ingest.models import Chapter, Segment
 from wenyi_direct.llm.providers.fake import FakeClient
-from wenyi_direct.pipeline.direct import DirectPipeline
+from wenyi_direct.pipeline.direct import AlignmentError, DirectPipeline
 from wenyi_direct.prompts import (
     CHINESE_FINDING_VALIDATION_SYSTEM,
     CHINESE_READER_SYSTEM,
@@ -266,6 +266,34 @@ def test_failed_repair_never_changes_formal_chapter(tmp_path: Path) -> None:
     assert shadow["targets"]["1"] == "闪光了。"
     usage = json.loads(Path(pipeline.store_for(source).usage_path).read_text(encoding="utf-8"))
     assert usage["providers"]
+
+
+def test_audit_id_digest_copy_error_is_recovered_but_unknown_segment_is_rejected(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    pipeline = DirectPipeline(config, {}, config_dir=tmp_path)
+    chapter = Chapter(
+        index=3,
+        title="章",
+        segments=[Segment(index=0, source="光った。", target="亮了。")],
+    )
+    response = {
+        "issues": [
+            {
+                "start_id": "ch3:s0:wrongdigest",
+                "end_id": "ch3:s0:wrongdigest",
+                "type": "other",
+                "detail": "test",
+            }
+        ]
+    }
+    parsed = pipeline._parse_issues(chapter, response, {0})
+    assert parsed[0]["start"] == 0
+
+    response["issues"][0]["start_id"] = "ch3:s99:wrongdigest"
+    with pytest.raises(AlignmentError, match="unknown stable ID"):
+        pipeline._parse_issues(chapter, response, {0})
 
 
 def test_cli_prepare_and_status_need_no_model_credentials(tmp_path: Path) -> None:

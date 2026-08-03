@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -558,10 +559,18 @@ class DirectPipeline:
             if not isinstance(raw, dict):
                 continue
             try:
-                start = id_map[str(raw["start_id"])]
-                end = id_map[str(raw.get("end_id", raw["start_id"]))]
-                cause_start = id_map[str(raw.get("cause_start_id", raw["start_id"]))]
-                cause_end = id_map[str(raw.get("cause_end_id", raw.get("end_id", raw["start_id"])))]
+                start = self._resolve_audit_id(chapter, id_map, raw["start_id"])
+                end = self._resolve_audit_id(
+                    chapter, id_map, raw.get("end_id", raw["start_id"])
+                )
+                cause_start = self._resolve_audit_id(
+                    chapter, id_map, raw.get("cause_start_id", raw["start_id"])
+                )
+                cause_end = self._resolve_audit_id(
+                    chapter,
+                    id_map,
+                    raw.get("cause_end_id", raw.get("end_id", raw["start_id"])),
+                )
             except (KeyError, TypeError):
                 raise AlignmentError(f"audit issue contains an unknown stable ID: {raw}")
             if not set(range(min(start, end), max(start, end) + 1)) & allowed_starts:
@@ -577,6 +586,21 @@ class DirectPipeline:
             )
         return parsed
 
+    @staticmethod
+    def _resolve_audit_id(
+        chapter: Chapter, id_map: dict[str, int], value: Any
+    ) -> int:
+        """Recover an audit location when only the copied digest suffix is wrong."""
+        stable_id = str(value)
+        if stable_id in id_map:
+            return id_map[stable_id]
+        match = re.fullmatch(r"ch(\d+):s(\d+):[0-9A-Za-z_-]+", stable_id)
+        if match and int(match.group(1)) == chapter.index:
+            index = int(match.group(2))
+            if any(segment.index == index for segment in chapter.text_segments):
+                return index
+        raise KeyError(stable_id)
+
     def _parse_reader_validation(
         self, chapter: Chapter, response: Any, original_issue: dict
     ) -> dict:
@@ -589,8 +613,10 @@ class DirectPipeline:
             segment_id(chapter.index, segment): segment.index for segment in chapter.text_segments
         }
         try:
-            start = id_map[str(response["repair_start_id"])]
-            end = id_map[str(response["repair_end_id"])]
+            start = self._resolve_audit_id(
+                chapter, id_map, response["repair_start_id"]
+            )
+            end = self._resolve_audit_id(chapter, id_map, response["repair_end_id"])
         except (KeyError, TypeError):
             raise AlignmentError("reader validation returned an unknown repair range")
         result.update(
