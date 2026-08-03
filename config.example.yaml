@@ -1,0 +1,62 @@
+language:
+  source: ja
+  target: zh-CN
+
+providers:
+  sol:
+    provider: codex-cli
+    command: codex
+    timeout: 1200
+    tiers:
+      strong:
+        model: gpt-5.6-sol
+        options: {reasoning_effort: high}
+  # api:
+  #   provider: openai-compatible
+  #   base_url: https://example.invalid/v1
+  #   api_key_env: TRANSLATION_API_KEY
+  #   tiers:
+  #     strong: {model: vendor-model-name}
+  # messages_api:
+  #   provider: anthropic-compatible
+  #   base_url: https://api.anthropic.com
+  #   api_key_env: ANTHROPIC_API_KEY
+  #   tiers:
+  #     strong: {model: claude-sonnet-4-5}
+  # gemini:
+  #   provider: agy
+  #   command: agy
+  #   tiers:
+  #     strong: {model: gemini-3.1-pro-high}
+
+roles:
+  translate: sol
+  factual_audit: sol
+  chinese_audit: sol
+  repair: sol
+  validation: sol
+
+window:
+  max_read_chars: 60000
+  max_write_chars: 18000
+  source_halo_chars: 8000
+  past_context_chars: 4000
+
+pipeline:
+  factual_audit: true
+  chinese_reader_audit: true
+  max_repair_attempts: 2
+  repair_context_segments: 2
+
+segment:
+  max_chars_per_segment: 0
+
+paths:
+  state_dir: state
+  output_dir: outputs
+  hard_terms_file: hard-terms.yaml
+
+output:
+  mono: true
+  bilingual: false
+  about_page: true
