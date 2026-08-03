@@ -22,8 +22,10 @@ promotion to the final text.
 - The formal chapter is replaced atomically only after structural checks and
   source-fidelity validation of every changed repair region. Keep proposals in
   shadow state and append every stage to `artifacts/`.
-- Only human-confirmed hard terms are mandatory. Suggested terms and inferred facts
-  are advisory and must retain evidence and visibility boundaries.
+- Only `active` hard terminology is mandatory; `active` preferred rules are advisory,
+  while candidate/rejected rules never enter model prompts. Translation groups mean
+  shared target fragments, never entity identity. Hard rules must pass deterministic
+  checks after repair and before Formal promotion.
 - Codex CLI business calls must remain ephemeral, read-only, and isolated from user
   rules. API keys belong in environment variables, never YAML or Git.
 

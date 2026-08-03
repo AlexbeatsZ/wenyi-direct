@@ -9,8 +9,8 @@ sees unpolluted source context and produces the candidate directly.
 
 The project also does not require reading the whole book first. Human translators
 work on serial fiction and newly released chapters all the time. A current chapter,
-nearby source, and confirmed past facts are enough to translate without treating
-future revelations as a prerequisite.
+nearby source, and a bounded raw tail from completed chapters are enough to translate
+without treating future revelations as a prerequisite.
 
 ## Data and control flow
 
@@ -64,11 +64,25 @@ addressed under `artifacts/inputs/`; translation proposals and accepted stages a
 append-only JSONL, as are audits and events. A crash can repeat an audit but cannot
 expose a half-reviewed chapter as final output.
 
-## Knowledge and terminology
+## Terminology
 
-Only entries deliberately placed in `hard-terms.yaml` are mandatory. Terms have a
-`from_chapter` visibility boundary and are retrieved only when their source spelling
-appears in the current read scope. Past facts can use the same visibility principle.
+`terminology.yaml` contains only `groups` and `terms`. A group stores the source and
+target fragments shared by explicitly linked expressions; it is not a person, place,
+event, or entity record. Terms are retrieved only when active, within their optional
+chapter range, and actually present in the current source scope. Longer matches take
+priority over nested shorter matches.
+
+`mode` and `status` are independent: hard rules are mechanically enforced while
+preferred rules are suggestions; active rules participate while candidate/rejected
+rules never enter prompts. The factual audit may discover stable names at no extra
+model-call cost. A non-conflicting discovery becomes `active + preferred`; a conflict
+becomes `candidate`, and an exact rejected mapping is not proposed again.
+
+Hard terminology is deterministically checked after repair and again before Formal
+promotion. Repair and fidelity-validation prompts receive the same current
+terminology snapshot as direct translation and factual audit. The Chinese Reader
+Audit remains Chinese-only and therefore receives none of it.
+
 There is no model-generated whole-book bible in the default path.
 
 The prompt may also receive a small raw tail from already completed chapters:

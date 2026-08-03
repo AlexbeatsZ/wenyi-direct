@@ -17,8 +17,14 @@ Its quality path is:
 4. The reviewed shadow chapter atomically becomes formal text. Every proposal and
    input snapshot remains append-only under the run's `artifacts/` directory.
 
-No future chapter is required. Confirmed past knowledge may accumulate as a serial
-work progresses, while spoiler-sensitive facts carry an explicit visibility point.
+No future chapter is required. A bounded raw tail from completed chapters supplies
+past-only context as a serial work progresses.
+
+Terminology supports translation-sharing groups plus per-term `mode`, `status`,
+chapter range, and optional pronoun guidance. Factual audit can discover stable names
+without another model call: non-conflicting discoveries become soft active
+preferences, conflicts remain inactive candidates, and rejected mappings stay out.
+Hard rules are checked mechanically during repair and before final promotion.
 
 ## Supported model transports
 
@@ -39,6 +45,11 @@ uv run wenyi-direct init-config config.yaml
 uv run wenyi-direct translate path\to\book.epub --config config.yaml
 uv run wenyi-direct status path\to\book.epub --config config.yaml
 uv run wenyi-direct assemble path\to\book.epub --config config.yaml --format epub
+
+# terminology lifecycle
+uv run wenyi-direct terms group-add flame 炎 火焰 --config config.yaml
+uv run wenyi-direct terms add 炎魔法 火焰魔法 --group flame --mode hard --config config.yaml
+uv run wenyi-direct terms set-status 炎魔法 active --config config.yaml
 ```
 
 Inputs: EPUB, FB2, TXT, Markdown, HTML, PDF, and the documented JSON interchange

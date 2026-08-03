@@ -11,17 +11,18 @@ TRANSLATION_SYSTEM = """你是中文文学译者。忠实理解整个可见语�
 第一次译文必须自行从原文建立语义结构，不得假想或依赖已有草稿。
 人物说出口的话要像人物在当下情境里自然会说的话：短促观察、低语、惊呼和命令不要被改成书面旁白。
 允许利用只读上下文判断后置主语、说话者、指代和多义词，但不得把当前位置尚未揭示的信息提前写进译文。
-硬术语必须采用；其余普通词按语境翻译。保留段落意义和顺序，不合并、拆分或遗漏待写段。
+active hard 术语必须采用；active preferred 术语只是建议，以自然准确为先。pronoun=neutral 时不要主动补出他或她。保留段落意义和顺序，不合并、拆分或遗漏待写段。
 输入中的说话者提示、控制标记和范围标签只用于理解，不得擅自写进译文。"""
 
 FACTUAL_AUDIT_SYSTEM = """你是文学翻译的事实审校员。逐项比较原文与中文，检查误译、漏译、增译、指代、主语、说话者、时态、否定、数量、术语和跨段语义关系。
-只报告有原文证据的问题。定位症状段，也定位造成问题的最早/最晚因果段；问题可能跨越多段。不要做纯粹的文风润色。"""
+只报告有原文证据的问题。定位症状段，也定位造成问题的最早/最晚因果段；问题可能跨越多段。不要做纯粹的文风润色。
+可顺便提取明确的专名、设定名或稳定称呼；不要把普通动词、形容词、多义描写词当作术语。"""
 
 REPAIR_SYSTEM = """你是文学翻译修复者。根据给出的审校问题，在完整修复区域内统一改写。
-先重新理解区域原文及邻近上下文，再写自然中文；不要只替换被点名的词。只能输出允许写入的稳定 ID，数量必须完全一致。"""
+先重新理解区域原文及邻近上下文，再写自然中文；不要只替换被点名的词。active hard 术语必须采用，preferred 仅供参考。只能输出允许写入的稳定 ID，数量必须完全一致。"""
 
 FIDELITY_SYSTEM = """你是严格的源文忠实度验证员。判断候选中文是否在给定上下文中准确、完整，且没有凭空增加事实。
-自然的中文重组不是错误。若不合格，给出可以直接指导下一次修复的简短问题。"""
+自然的中文重组不是错误。检查 active hard 术语和代词提示；若不合格，给出可以直接指导下一次修复的简短问题。"""
 
 # Deliberately contains no translation instructions and receives no source material.
 CHINESE_READER_SYSTEM = """你是一名挑剔但务实的中文小说读者。只按眼前文本的实际阅读体验检查：
@@ -107,7 +108,13 @@ def factual_audit_messages(
                     "detail": "原文证据和问题",
                     "required_meaning": "必须保留的含义",
                 }
-            ]
+            ],
+            "term_candidates": [
+                {
+                    "source": "当前窗口实际出现的明确专名或设定称呼",
+                    "target": "当前译文中实际采用的稳定译法",
+                }
+            ],
         },
     }
     return [
@@ -202,10 +209,12 @@ def repair_messages(
     read_indexes: tuple[int, ...],
     write_indexes: tuple[int, ...],
     issues: tuple[dict, ...],
+    knowledge: dict,
     feedback: list[dict] | None = None,
 ) -> list[dict[str, str]]:
     payload = {
         "issues": issues,
+        "knowledge": knowledge,
         "previous_validation_feedback": feedback or [],
         "segments": [
             {
@@ -241,8 +250,10 @@ def fidelity_validation_messages(
     targets: dict[int, str],
     read_indexes: tuple[int, ...],
     changed_indexes: tuple[int, ...],
+    knowledge: dict,
 ) -> list[dict[str, str]]:
     payload = {
+        "knowledge": knowledge,
         "segments": [
             {
                 "id": segment_id(chapter.index, chapter.segments[index]),
@@ -254,9 +265,7 @@ def fidelity_validation_messages(
         ],
         "output_schema": {
             "valid": True,
-            "issues": [
-                {"id": "问题段", "detail": "错误", "required_meaning": "正确含义"}
-            ],
+            "issues": [{"id": "问题段", "detail": "错误", "required_meaning": "正确含义"}],
         },
     }
     return [

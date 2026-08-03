@@ -21,7 +21,7 @@ from ..prompts import (
     repair_messages,
     translation_messages,
 )
-from .knowledge import KnowledgeBase
+from .knowledge import TerminologyStore
 from .repair import RepairPlanner
 from .runstore import STATUS_DONE, RunStore, slugify
 from .types import RepairRegion, TranslationWindow, chapter_source_digest, segment_id
@@ -55,10 +55,10 @@ class DirectPipeline:
         self.config_dir = Path(config_dir).resolve()
         self.window_planner = WindowPlanner(config.window)
         self.repair_planner = RepairPlanner(config.pipeline.repair_context_segments)
-        terms_path = config.hard_terms_file
-        if terms_path and not Path(terms_path).is_absolute():
-            terms_path = str(self.config_dir / terms_path)
-        self.knowledge = KnowledgeBase.load(terms_path)
+        terms_path = Path(config.terminology_file or "terminology.yaml")
+        if not terms_path.is_absolute():
+            terms_path = self.config_dir / terms_path
+        self.terminology = TerminologyStore.load(terms_path)
 
     def store_for(self, source_path: str | Path) -> RunStore:
         state_root = Path(self.config.state_dir)
@@ -267,11 +267,34 @@ class DirectPipeline:
             )
             parsed = self._parse_issues(chapter, response, set(window.write_indexes))
             issues.extend(parsed)
+            discoveries = (
+                list(response.get("term_candidates", []))
+                if isinstance(response, dict)
+                and isinstance(response.get("term_candidates", []), list)
+                else []
+            )
+            added_terms = self.terminology.add_discoveries(
+                chapter.index,
+                discoveries,
+                source,
+                "\n".join(targets[index] for index in window.read_indexes),
+            )
             store.record_audit(
                 chapter.index,
                 "factual_audit",
-                {"input_ref": input_ref, "issues": parsed},
+                {
+                    "input_ref": input_ref,
+                    "issues": parsed,
+                    "added_terms": [term.model_dump(exclude_none=True) for term in added_terms],
+                },
             )
+        issues.extend(
+            self._terminology_issues(
+                chapter,
+                targets,
+                tuple(segment.index for segment in chapter.text_segments),
+            )
+        )
         for region in self.repair_planner.plan(issues, len(chapter.segments)):
             targets = self._repair_and_validate(
                 store, chapter, targets, region, "factual_repair"
@@ -360,12 +383,17 @@ class DirectPipeline:
         )
         feedback: list[dict] = []
         for attempt in range(1, self.config.pipeline.max_repair_attempts + 1):
+            source = "\n".join(
+                chapter.segments[index].source for index in read_indexes
+            )
+            knowledge = self._knowledge_for(store, chapter, source)
             messages = repair_messages(
                 chapter,
                 targets,
                 read_indexes,
                 write_indexes,
                 region.issues,
+                knowledge,
                 feedback,
             )
             input_ref = store.save_translation_input(
@@ -388,8 +416,26 @@ class DirectPipeline:
                 input_ref=input_ref,
                 metadata={"attempt": attempt},
             )
+            term_feedback = self._terminology_issues(
+                chapter, proposed, write_indexes
+            )
+            if term_feedback:
+                feedback = term_feedback
+                store.record_audit(
+                    chapter.index,
+                    f"{stage}_fidelity",
+                    {
+                        "input_ref": input_ref,
+                        "attempt": attempt,
+                        "valid": False,
+                        "issues": feedback,
+                        "write_indexes": list(write_indexes),
+                        "validator": "hard_terminology",
+                    },
+                )
+                continue
             validation_messages = fidelity_validation_messages(
-                chapter, proposed, read_indexes, write_indexes
+                chapter, proposed, read_indexes, write_indexes, knowledge
             )
             validation_ref = store.save_translation_input(
                 {"stage": f"{stage}_fidelity", "messages": validation_messages}
@@ -439,6 +485,15 @@ class DirectPipeline:
         ]
         if missing:
             raise AlignmentError(f"cannot promote chapter with empty targets: {missing}")
+        term_issues = self._terminology_issues(
+            chapter,
+            targets,
+            tuple(segment.index for segment in chapter.text_segments),
+        )
+        if term_issues:
+            raise RuntimeError(
+                f"cannot promote chapter with hard terminology violations: {term_issues}"
+            )
         previous = {segment.index: segment.target or "" for segment in chapter.segments}
         for segment in chapter.segments:
             if segment.source.strip():
@@ -614,7 +669,7 @@ class DirectPipeline:
         self, store: RunStore, chapter: Chapter, read_source: str
     ) -> dict[str, Any]:
         """Combine confirmed knowledge with a bounded, past-only raw chapter tail."""
-        visible = self.knowledge.visible(chapter.index, read_source)
+        visible = self.terminology.visible(chapter.index, read_source)
         remaining = self.config.window.past_context_chars
         tail: list[dict[str, Any]] = []
         manifest = store.load_manifest()
@@ -641,10 +696,42 @@ class DirectPipeline:
                     break
         visible["past_only_raw_tail"] = list(reversed(tail))
         visible["evidence_priority"] = (
-            "current_and_nearby_source > confirmed facts > hard terms > "
+            "current_and_nearby_source > active hard terms > active preferred terms > "
             "past formal target"
         )
         return visible
+
+    def _terminology_issues(
+        self,
+        chapter: Chapter,
+        targets: dict[int, str],
+        indexes: tuple[int, ...],
+    ) -> list[dict[str, Any]]:
+        issues: list[dict[str, Any]] = []
+        for index in indexes:
+            segment = chapter.segments[index]
+            violations = self.terminology.hard_violations(
+                chapter.index, segment.source, targets.get(index, "")
+            )
+            for violation in violations:
+                issues.append(
+                    {
+                        "start": index,
+                        "end": index,
+                        "cause_start": index,
+                        "cause_end": index,
+                        "start_id": segment_id(chapter.index, segment),
+                        "end_id": segment_id(chapter.index, segment),
+                        "type": "term",
+                        "detail": (
+                            f"硬术语 {violation['source']!r} 必须采用 "
+                            f"{violation['required_target']!r}"
+                        ),
+                        "required_meaning": violation["required_target"],
+                        "terminology_violation": violation,
+                    }
+                )
+        return issues
 
 
 def export_json(store: RunStore, output_path: str | Path) -> str:

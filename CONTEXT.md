@@ -14,8 +14,13 @@
   repair against neighboring source text.
 - **Repair region**: a contiguous, context-expanded group of segments that may be
   wider than the reported symptom.
-- **Past knowledge**: confirmed terms/facts whose visibility starts no later than
-  the current chapter. It is evidence, not an authoritative generated synopsis.
+- **Terminology group**: a source/target fragment shared by explicitly linked term
+  rules. It coordinates rendering and says nothing about entity identity.
+- **Term mode**: `hard` blocks promotion when violated; `preferred` is advice only.
+- **Term status**: `active` participates; `candidate` and `rejected` stay out of
+  prompts. Status is lifecycle, not constraint strength.
+- **Past knowledge**: a bounded raw tail from already completed chapters. It is
+  evidence, not an authoritative generated synopsis.
 
 ## Pipeline
 

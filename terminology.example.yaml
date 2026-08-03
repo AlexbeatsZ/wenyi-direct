@@ -1,0 +1,24 @@
+groups:
+  flame:
+    source_anchor: 炎
+    target_anchor: 火焰
+
+terms:
+  - source: 炎魔法
+    target: 火焰魔法
+    group_id: flame
+    mode: hard
+    status: active
+
+  - source: ブラックホーク
+    target: 黑鹰
+    mode: hard
+    status: active
+
+  - source: 黒騎士
+    target: 黑骑士
+    mode: preferred
+    status: active
+    valid_from: 1
+    valid_to: 3
+    pronoun: neutral

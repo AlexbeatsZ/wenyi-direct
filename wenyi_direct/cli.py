@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import typer
-import yaml
 from rich.console import Console
 from rich.table import Table
 
@@ -13,11 +12,12 @@ from .assemble.writer import assemble as assemble_document
 from .config import Config
 from .llm.factory import build_clients
 from .pipeline.direct import DirectPipeline, export_json
+from .pipeline.knowledge import TerminologyStore, TermRule
 from .pipeline.runstore import STATUS_DONE, RunStore, slugify
 from .validate import validate_epub
 
 app = typer.Typer(no_args_is_help=True, help="Chapter-first literary translation.")
-terms_app = typer.Typer(no_args_is_help=True, help="Manage human-confirmed hard terms.")
+terms_app = typer.Typer(no_args_is_help=True, help="Manage terminology rules and groups.")
 app.add_typer(terms_app, name="terms")
 console = Console()
 
@@ -133,9 +133,7 @@ def assemble(
         raise typer.BadParameter("no state exists for this source")
     manifest = store.load_manifest()
     incomplete = [
-        chapter["index"]
-        for chapter in manifest["chapters"]
-        if chapter.get("status") != STATUS_DONE
+        chapter["index"] for chapter in manifest["chapters"] if chapter.get("status") != STATUS_DONE
     ]
     if incomplete:
         raise typer.BadParameter(f"formal translation is incomplete: chapters {incomplete}")
@@ -163,7 +161,7 @@ def assemble(
 
 
 def _terms_path(cfg: Config, config_path: Path) -> Path:
-    configured = cfg.hard_terms_file or "hard-terms.yaml"
+    configured = cfg.terminology_file or "terminology.yaml"
     path = Path(configured)
     return path if path.is_absolute() else config_path.resolve().parent / path
 
@@ -173,40 +171,96 @@ def list_terms(
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True),
 ) -> None:
     cfg = _load(config)
-    path = _terms_path(cfg, config)
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
-    for term in (data or {}).get("terms", []):
-        console.print(
-            f"{term.get('source')} -> {term.get('target')} "
-            f"(from chapter {term.get('from_chapter', 0)})"
+    store = TerminologyStore.load(_terms_path(cfg, config))
+    table = Table(title="Terminology")
+    for column in ("Source", "Target", "Group", "Mode", "Status", "Range", "Pronoun"):
+        table.add_column(column)
+    for term in store.terms:
+        valid_range = f"{term.valid_from if term.valid_from is not None else '*'}..{term.valid_to if term.valid_to is not None else '*'}"
+        table.add_row(
+            term.source,
+            term.target,
+            term.group_id or "",
+            term.mode,
+            term.status,
+            valid_range,
+            term.pronoun or "",
         )
+    console.print(table)
 
 
 @terms_app.command("add")
 def add_term(
     source: str,
     target: str,
-    from_chapter: int = typer.Option(0, min=0),
-    note: str | None = typer.Option(None),
+    group_id: str | None = typer.Option(None, "--group"),
+    mode: str = typer.Option("hard", help="hard or preferred"),
+    status: str = typer.Option("active", help="active, candidate, or rejected"),
+    valid_from: int | None = typer.Option(None, min=0),
+    valid_to: int | None = typer.Option(None, min=0),
+    pronoun: str | None = typer.Option(None, help="他, 她, 它, or neutral"),
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True),
 ) -> None:
-    """Add or update a human-confirmed hard term."""
+    """Add or replace the rule with the same source and chapter range."""
     cfg = _load(config)
-    path = _terms_path(cfg, config)
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
-    data = data or {}
-    terms = list(data.get("terms", []) or [])
-    terms = [term for term in terms if term.get("source") != source]
-    terms.append(
-        {
-            "source": source,
-            "target": target,
-            "from_chapter": from_chapter,
-            "note": note,
-            "confirmed": True,
-        }
+    store = TerminologyStore.load(_terms_path(cfg, config))
+    store.add_term(
+        TermRule(
+            source=source,
+            target=target,
+            group_id=group_id,
+            mode=mode,
+            status=status,
+            valid_from=valid_from,
+            valid_to=valid_to,
+            pronoun=pronoun,
+        )
     )
-    data["terms"] = terms
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    console.print(f"Saved {source} -> {target} in {path}")
+    console.print(f"Saved {source} -> {target} in {store.path}")
+
+
+@terms_app.command("set-status")
+def set_term_status(
+    source: str,
+    status: str,
+    target: str | None = typer.Option(
+        None, "--target", help="Only change the matching target translation"
+    ),
+    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True),
+) -> None:
+    """Change matching rules to active, candidate, or rejected."""
+    cfg = _load(config)
+    if status not in {"active", "candidate", "rejected"}:
+        raise typer.BadParameter("status must be active, candidate, or rejected")
+    store = TerminologyStore.load(_terms_path(cfg, config))
+    changed = store.set_status(source, status, target=target)
+    console.print(f"Updated {changed} rule(s)")
+
+
+@terms_app.command("group-add")
+def add_group(
+    group_id: str,
+    source_anchor: str,
+    target_anchor: str,
+    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True),
+) -> None:
+    """Add or replace one translation-sharing group."""
+    cfg = _load(config)
+    store = TerminologyStore.load(_terms_path(cfg, config))
+    store.add_group(group_id, source_anchor, target_anchor)
+    console.print(f"Saved group {group_id} in {store.path}")
+
+
+@terms_app.command("group-list")
+def list_groups(
+    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True),
+) -> None:
+    cfg = _load(config)
+    store = TerminologyStore.load(_terms_path(cfg, config))
+    table = Table(title="Terminology groups")
+    table.add_column("ID")
+    table.add_column("Source anchor")
+    table.add_column("Target anchor")
+    for group_id, group in store.groups.items():
+        table.add_row(group_id, group.source_anchor, group.target_anchor)
+    console.print(table)

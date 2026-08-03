@@ -99,6 +99,7 @@ def _handler(messages, _tier, _json_mode):
         )
     if system == FACTUAL_AUDIT_SYSTEM:
         row = next((row for row in payload["segments"] if row["source"] == "光った。"), None)
+        noel = next((row for row in payload["segments"] if "ノエル" in row["source"]), None)
         issues = []
         if row is not None and row["audit"]:
             issues.append(
@@ -112,7 +113,8 @@ def _handler(messages, _tier, _json_mode):
                     "required_meaning": "人物低声指出某处亮了",
                 }
             )
-        return json.dumps({"issues": issues}, ensure_ascii=False)
+        candidates = [{"source": "ノエル", "target": "诺艾尔"}] if noel is not None else []
+        return json.dumps({"issues": issues, "term_candidates": candidates}, ensure_ascii=False)
     if system == CHINESE_READER_SYSTEM:
         row = next((row for row in payload["text"] if row["text"] == "他到来了。"), None)
         issues = []
@@ -176,6 +178,10 @@ def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) ->
     assert manifest["chapters"][0]["status"] == "done"
     assert manifest["chapters"][1]["status"] == "pending"
     assert manifest["future_chapters_required"] is False
+    discovered = next(term for term in pipeline.terminology.terms if term.source == "ノエル")
+    assert discovered.mode == "preferred"
+    assert discovered.status == "active"
+    assert discovered.valid_from == 0
 
     chinese_calls = [
         call for call in fake.calls if call["messages"][0]["content"] == CHINESE_READER_SYSTEM
@@ -189,9 +195,7 @@ def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) ->
 
     calls_before_second_chapter = len(fake.calls)
     pipeline.run(source, chapters={1})
-    second_chapter_calls = json.dumps(
-        fake.calls[calls_before_second_chapter:], ensure_ascii=False
-    )
+    second_chapter_calls = json.dumps(fake.calls[calls_before_second_chapter:], ensure_ascii=False)
     assert "未来の秘密。" in second_chapter_calls
     assert "彼が来た。" in second_chapter_calls
     assert "他来了。" in second_chapter_calls

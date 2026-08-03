@@ -109,7 +109,7 @@ class Config(BaseModel):
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
     segment: SegmentConfig = Field(default_factory=SegmentConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
-    hard_terms_file: str | None = None
+    terminology_file: str | None = None
 
     @model_validator(mode="after")
     def validate_roles(self) -> "Config":
@@ -129,8 +129,10 @@ class Config(BaseModel):
         raw["target_lang"] = language.get("target", raw.get("target_lang", "zh-CN"))
         raw["state_dir"] = paths.get("state_dir", raw.get("state_dir", "state"))
         raw["output_dir"] = paths.get("output_dir", raw.get("output_dir", "outputs"))
-        raw["hard_terms_file"] = paths.get(
-            "hard_terms_file", raw.get("hard_terms_file")
+        legacy_terms_file = raw.pop("hard_terms_file", None)
+        raw["terminology_file"] = paths.get(
+            "terminology_file",
+            paths.get("hard_terms_file", raw.get("terminology_file", legacy_terms_file)),
         )
         return cls.model_validate(raw)
 
@@ -188,7 +190,7 @@ segment:
 paths:
   state_dir: state
   output_dir: outputs
-  # hard_terms_file: hard-terms.yaml
+  terminology_file: terminology.yaml
 
 output:
   mono: true

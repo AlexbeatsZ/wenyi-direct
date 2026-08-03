@@ -54,7 +54,7 @@ segment:
 paths:
   state_dir: state
   output_dir: outputs
-  hard_terms_file: hard-terms.yaml
+  terminology_file: terminology.yaml
 
 output:
   mono: true
