@@ -60,7 +60,7 @@ _JSON_REQUIREMENT = (
 
 
 def format_agy_prompt(messages: Messages, *, json_mode: bool = False) -> str:
-    """把多角色消息折叠为 agy ``--print`` 接受的一条普通提示词。
+    """把多角色消息折叠为 agy ``--print`` 从标准输入读取的普通提示词。
 
     agy 1.0.x 没有单次 system prompt 参数，因此 ``System`` 只是明确标注的
     普通提示词前缀，不冒充原生 system 消息。
@@ -212,10 +212,10 @@ class AgyClient(LLMClient):
                                 "--print-timeout",
                                 f"{self.timeout}s",
                                 "--print",
-                                prompt + retry_note,
                             ]
                             result = subprocess.run(
                                 args,
+                                input=prompt + retry_note,
                                 cwd=self.cwd,
                                 env=self.env,
                                 capture_output=True,
@@ -260,11 +260,6 @@ class AgyClient(LLMClient):
                     if completed:
                         break
         except FileNotFoundError as exc:
-            if getattr(exc, "winerror", None) == 206:
-                raise RuntimeError(
-                    "agy 提示词导致 Windows 命令行过长；"
-                    "请缩小当前批次或减少注入上下文"
-                ) from exc
             raise RuntimeError(
                 f"找不到 agy CLI：{self.command!r}；请先安装并确认其位于 PATH"
             ) from exc
