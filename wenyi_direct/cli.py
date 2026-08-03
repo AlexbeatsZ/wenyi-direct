@@ -97,6 +97,30 @@ def status(
     _print_status(store)
 
 
+@app.command()
+def monitor(
+    source: Path = typer.Argument(..., exists=True, dir_okay=False),
+    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True),
+    host: str = typer.Option("127.0.0.1", help="Read-only monitor bind address."),
+    port: int = typer.Option(8765, min=0, max=65535),
+    open_browser: bool = typer.Option(True, "--open/--no-open"),
+) -> None:
+    """Serve a live audit trail and Formal/Shadow chapter reader."""
+    from .monitor import serve
+
+    cfg = _load(config)
+    store = _store(cfg, config, source)
+    if not store.exists():
+        raise typer.BadParameter("no state exists for this source; run prepare or translate")
+    serve(
+        Path(store.run_dir),
+        config,
+        host=host,
+        port=port,
+        open_browser=open_browser,
+    )
+
+
 def _print_status(store: RunStore) -> None:
     manifest = store.load_manifest()
     table = Table(title=manifest["title"])

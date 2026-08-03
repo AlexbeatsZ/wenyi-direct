@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wenyi 实时观察器</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: light-dark(#f4f1ea, #101214);
+      --panel: light-dark(#fffdf8, #191c1f);
+      --panel2: light-dark(#f0ece3, #22262a);
+      --text: light-dark(#23211d, #ecede9);
+      --muted: light-dark(#6b675e, #a7aca9);
+      --line: light-dark(#d8d1c4, #343a3f);
+      --accent: light-dark(#0d746b, #69d3c7);
+      --accent-soft: light-dark(#d8eee9, #173b39);
+      --warn: light-dark(#9a5b00, #ffc46b);
+      --warn-soft: light-dark(#fff0d6, #3d2c18);
+      --bad: light-dark(#a23b3b, #ff9090);
+      --bad-soft: light-dark(#f7dddd, #402122);
+      --good: light-dark(#287148, #7fd5a5);
+      --good-soft: light-dark(#dceee3, #193829);
+      --shadow: 0 12px 36px light-dark(#4d44351a, #00000044);
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+    button, select { font: inherit; }
+    .shell { width: min(1480px, calc(100% - 32px)); margin: 24px auto 56px; }
+    .app-header { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 18px; }
+    h1 { margin: 0; font-size: clamp(24px, 3vw, 42px); font-weight: 650; letter-spacing: -.03em; }
+    .eyebrow { color: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; margin-bottom: 5px; }
+    .live { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; text-align: right; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 6px var(--good-soft); }
+    .surface-nav { display: flex; gap: 7px; margin: 0 0 14px; }
+    .surface-button { border: 1px solid var(--line); border-radius: 999px; padding: 8px 14px; color: var(--muted); background: var(--panel); cursor: pointer; }
+    .surface-button[aria-pressed="true"] { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); padding: 18px; }
+    .hero { grid-column: span 8; min-height: 230px; position: relative; overflow: hidden; }
+    .hero::after { content: ""; position: absolute; width: 260px; height: 260px; border-radius: 50%; right: -100px; top: -110px; background: var(--accent-soft); }
+    .stats { grid-column: span 4; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-content: start; }
+    .stat { padding: 14px; background: var(--panel2); border-radius: 12px; }
+    .stat .label { color: var(--muted); font-size: 12px; }
+    .stat .value { font-size: 26px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+    .section-title { font-size: 15px; font-weight: 700; margin: 0 0 12px; }
+    .stage { position: relative; z-index: 1; font-size: 13px; color: var(--accent); font-weight: 700; }
+    .current-title { position: relative; z-index: 1; font-size: clamp(23px, 3vw, 34px); font-weight: 700; margin: 8px 0 12px; max-width: 80%; }
+    .current-desc { position: relative; z-index: 1; max-width: 75%; color: var(--muted); line-height: 1.65; }
+    .chips { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 7px; margin-top: 16px; }
+    .chip { border-radius: 999px; padding: 5px 9px; background: var(--accent-soft); color: var(--text); font-size: 12px; }
+    .precision { position: relative; z-index: 1; margin-top: 13px; color: var(--muted); font-size: 12px; }
+    .progress-panel { grid-column: span 12; }
+    .progress-row { display: grid; grid-template-columns: 145px 1fr 96px; align-items: center; gap: 12px; margin: 10px 0; }
+    .track { height: 12px; background: var(--panel2); border-radius: 999px; overflow: hidden; }
+    .fill { height: 100%; background: var(--accent); border-radius: inherit; transition: width .3s ease; }
+    .progress-value { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .quality { grid-column: span 5; }
+    .usage { grid-column: span 7; }
+    .bar-row { display: grid; grid-template-columns: minmax(90px, 1.1fr) 3fr 96px; gap: 10px; align-items: center; margin: 8px 0; font-size: 13px; }
+    .mini-track { height: 8px; background: var(--panel2); border-radius: 999px; overflow: hidden; }
+    .mini-fill { height: 100%; background: var(--accent); border-radius: inherit; }
+    .number { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+    .activity { grid-column: span 12; }
+    .toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+    .tabs { display: flex; gap: 6px; }
+    .tab { color: var(--muted); background: var(--panel2); border: 1px solid transparent; border-radius: 999px; padding: 7px 12px; cursor: pointer; }
+    .tab[aria-pressed="true"] { color: var(--text); background: var(--accent-soft); border-color: var(--accent); }
+    .feed { display: grid; gap: 10px; }
+    .item { border-top: 1px solid var(--line); padding: 15px 0 4px; }
+    .item:first-child { border-top: 0; padding-top: 3px; }
+    .item-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 9px; }
+    .badge { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; background: var(--panel2); }
+    .badge.fixed { background: var(--good-soft); color: var(--good); }
+    .badge.rejected { background: var(--warn-soft); color: var(--warn); }
+    .meta { color: var(--muted); font-size: 12px; }
+    .reason { line-height: 1.6; margin: 6px 0 9px; }
+    .suggestion { color: var(--muted); line-height: 1.55; font-size: 13px; }
+    .text-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 11px; }
+    .quote { background: var(--panel2); border-radius: 10px; padding: 11px; line-height: 1.55; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+    .quote .quote-label { color: var(--muted); font-size: 11px; display: block; margin-bottom: 4px; }
+    .source { grid-column: 1 / -1; }
+    .empty { color: var(--muted); padding: 26px 0; text-align: center; }
+    .visibility { grid-column: span 12; display: flex; align-items: start; gap: 14px; }
+    .visibility strong { white-space: nowrap; }
+    .visibility p { margin: 0; color: var(--muted); line-height: 1.6; }
+    .error { color: var(--bad); background: var(--bad-soft); padding: 12px; border-radius: 10px; }
+    .reader-shell { width: min(980px, 100%); margin: 0 auto; }
+    .reader-toolbar { position: sticky; top: 8px; z-index: 5; background: color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter: blur(12px); }
+    .reader-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 12px; }
+    .reader-monitor-return { min-height: 34px !important; margin-left: auto; padding: 0 11px; }
+    .reader-controls { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto auto; gap: 8px; align-items: center; }
+    .reader-control { min-height: 42px; border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; color: var(--text); background: var(--panel2); cursor: pointer; }
+    .reader-control:disabled { opacity: .42; cursor: default; }
+    .reader-select { min-width: 0; width: 100%; cursor: pointer; }
+    .reader-status { color: var(--muted); font-size: 12px; }
+    .reader-book { margin-top: 14px; padding: clamp(20px, 5vw, 56px); }
+    .reader-chapter-head { margin-bottom: 38px; text-align: center; }
+    .reader-chapter-title { margin: 0 0 10px; font-family: "Noto Serif SC", "Songti SC", "SimSun", serif; font-size: clamp(24px, 5vw, 36px); line-height: 1.4; letter-spacing: 0; }
+    .reader-chapter-meta { color: var(--muted); font-size: 13px; }
+    .reader-compare { margin-top: 13px; }
+    .reader-content { font-family: "Noto Serif SC", "Songti SC", "SimSun", serif; font-size: var(--reader-font-size, 19px); line-height: 1.95; letter-spacing: .02em; overflow-wrap: anywhere; }
+    .reader-segment { margin-bottom: 1.18em; }
+    .reader-target { margin: 0; white-space: pre-wrap; text-align: justify; text-justify: inter-ideograph; }
+    .reader-heading { margin: 2.1em 0 1em; font-size: 1.18em; text-align: center; }
+    .reader-source { display: none; margin: .55em 0 0; padding-left: 12px; border-left: 2px solid var(--line); color: var(--muted); font-family: "Noto Serif JP", "Yu Mincho", "Meiryo", serif; font-size: .78em; line-height: 1.75; white-space: pre-wrap; }
+    .reader-shell.show-source .reader-source { display: block; }
+    .reader-bottom-nav { display: flex; gap: 10px; margin-top: 50px; }
+    .reader-bottom-nav button { flex: 1; }
+    .reader-empty { padding: 42px 18px; color: var(--muted); text-align: center; border: 1px dashed var(--line); border-radius: 12px; }
+    .reader-notice { min-height: 20px; margin-top: 9px; color: var(--accent); font-size: 12px; }
+    @media (max-width: 900px) {
+      .hero, .stats, .quality, .usage { grid-column: span 12; }
+      .current-desc { max-width: 100%; }
+      .progress-row { grid-template-columns: 110px 1fr 72px; }
+    }
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 20px, 1480px); margin-top: 14px; }
+      .app-header { align-items: start; flex-direction: column; gap: 10px; }
+      .live { text-align: left; }
+      .panel { padding: 14px; border-radius: 13px; }
+      .stats { grid-template-columns: 1fr 1fr; }
+      .text-pair { grid-template-columns: 1fr; }
+      .source { grid-column: auto; }
+      .progress-row { grid-template-columns: 1fr auto; }
+      .progress-row .track { grid-column: 1 / -1; grid-row: 2; }
+      .bar-row { grid-template-columns: 90px 1fr 78px; }
+      .visibility { flex-direction: column; }
+      .reader-toolbar { top: 4px; }
+      .reader-controls { grid-template-columns: auto minmax(0, 1fr) auto; }
+      .reader-controls .reader-secondary { grid-row: 2; }
+      .reader-controls #readerRefresh { grid-column: 1 / 3; }
+      .reader-book { padding: 22px 17px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="app-header">
+      <div><div class="eyebrow">Formal + Shadow · Read only</div><h1 id="book">Wenyi Direct 实时观察器</h1></div>
+      <div class="live"><span class="dot"></span><span id="freshness">正在连接…</span></div>
+    </header>
+
+    <nav class="surface-nav" aria-label="主要视图">
+      <button class="surface-button" data-surface="monitor" aria-pressed="true">运行监控</button>
+      <button class="surface-button" data-surface="reader" aria-pressed="false">阅读情节</button>
+    </nav>
+
+    <div class="grid" id="monitorView">
+      <section class="panel hero" aria-labelledby="currentHeading">
+        <div class="stage" id="stage">读取状态中</div>
+        <div class="current-title" id="currentHeading">—</div>
+        <div class="current-desc" id="currentDesc">正在读取当前模型阶段。</div>
+        <div class="chips" id="modelChips"></div>
+        <div class="precision" id="precision"></div>
+      </section>
+
+      <section class="panel stats" aria-label="摘要">
+        <div class="stat"><div class="label">已有可读稿</div><div class="value" id="translated">—</div></div>
+        <div class="stat"><div class="label">质量门完成</div><div class="value" id="reviewed">—</div></div>
+        <div class="stat"><div class="label">发现问题</div><div class="value" id="issuesCount">—</div></div>
+        <div class="stat"><div class="label">已自动修复</div><div class="value" id="fixedCount">—</div></div>
+      </section>
+
+      <section class="panel progress-panel">
+        <h2 class="section-title">全流程进度</h2>
+        <div class="progress-row"><span>Formal / Shadow 可读</span><div class="track"><div class="fill" id="translationFill"></div></div><span class="progress-value" id="translationValue">—</span></div>
+        <div class="progress-row"><span>事实 + 中文质量门</span><div class="track"><div class="fill" id="reviewFill"></div></div><span class="progress-value" id="reviewValue">—</span></div>
+      </section>
+
+      <section class="panel quality">
+        <h2 class="section-title">事实与中文问题构成</h2>
+        <div id="qualityBars"></div>
+      </section>
+      <section class="panel usage">
+        <h2 class="section-title">模型处理量（按阶段）</h2>
+        <div id="usageBars"></div>
+      </section>
+
+      <section class="panel activity">
+        <div class="toolbar">
+          <h2 class="section-title" style="margin:0">模型活动与审校证据</h2>
+          <div class="tabs" role="group" aria-label="活动筛选">
+            <button class="tab" data-view="issues" aria-pressed="true">审校问题</button>
+            <button class="tab" data-view="events" aria-pressed="false">流程事件</button>
+          </div>
+        </div>
+        <div class="feed" id="feed"></div>
+      </section>
+
+      <section class="panel visibility">
+        <strong>推理可见性</strong>
+        <p id="visibility">这里展示可审计的输入、输出、结构化理由和修复轨迹。模型私有思维链不会由当前接口返回，也不会在此猜测。</p>
+      </section>
+    </div>
+
+    <section class="reader-shell" id="readerView" hidden>
+      <div class="panel reader-toolbar">
+        <div class="reader-summary">
+          <span class="chip" id="readerTranslation">Formal —</span>
+          <span class="chip" id="readerReview">质量门 —</span>
+          <span class="reader-status" id="readerUpdated">尚未载入</span>
+          <button class="reader-control reader-monitor-return" id="readerMonitor">返回监控</button>
+        </div>
+        <div class="reader-controls">
+          <button class="reader-control" id="readerPrev" aria-label="上一章">‹</button>
+          <select class="reader-control reader-select" id="readerSelect" aria-label="选择章节"></select>
+          <button class="reader-control" id="readerNext" aria-label="下一章">›</button>
+          <button class="reader-control reader-secondary" id="readerRefresh">重新载入本章</button>
+          <button class="reader-control reader-secondary" id="readerSource" aria-pressed="false">显示原文</button>
+          <button class="reader-control reader-secondary" id="readerFont" aria-label="调整正文字号">Aa</button>
+        </div>
+        <div class="reader-notice" id="readerNotice" role="status"></div>
+      </div>
+      <article class="panel reader-book">
+        <header class="reader-chapter-head">
+          <h2 class="reader-chapter-title" id="readerTitle">选择章节开始阅读</h2>
+          <div class="reader-chapter-meta" id="readerMeta"></div>
+        </header>
+        <div class="reader-content" id="readerContent" aria-live="polite"></div>
+        <nav class="reader-bottom-nav" aria-label="章节导航">
+          <button class="reader-control" id="readerBottomPrev">上一章</button>
+          <button class="reader-control" id="readerBottomNext">下一章</button>
+        </nav>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const READER_FONT_SIZES = [17, 19, 21, 23];
+    const state = {
+      data: null, view: 'issues', surface: 'monitor', surfaceScroll: {monitor: 0, reader: 0},
+      reader: {
+        book: null, chapter: null, loading: false,
+        index: Number(localStorage.getItem('wenyi.observer.chapter')),
+        fontIndex: Number(localStorage.getItem('wenyi.observer.font')) || 1,
+        showSource: localStorage.getItem('wenyi.observer.source') === '1',
+      }
+    };
+    const $ = (id) => document.getElementById(id);
+    const fmt = new Intl.NumberFormat('zh-CN');
+    const typeLabels = { mistranslation:'误译', omission:'漏译', addition:'增译', reference:'指代', speaker:'说话者', term:'术语', collocation:'搭配', syntax:'句法', translationese:'翻译腔', voice:'人物声音', subject:'主语', dialogue:'对话', coherence:'连贯', rhythm:'节奏', register:'语域', punctuation:'标点', unnatural:'不自然', other:'其他' };
+
+    function text(tag, value, cls) {
+      const el = document.createElement(tag); if (cls) el.className = cls; el.textContent = value ?? ''; return el;
+    }
+    function pct(value, total) { return total ? Math.max(0, Math.min(100, value / total * 100)) : 0; }
+    function shortTime(ts) {
+      if (!ts) return '时间未知';
+      const d = new Date(ts); return Number.isNaN(d.valueOf()) ? ts : d.toLocaleString('zh-CN', {hour12:false});
+    }
+    function setProgress(fillId, valueId, value, total) {
+      $(fillId).style.width = `${pct(value,total)}%`; $(valueId).textContent = `${value} / ${total}`;
+    }
+    function renderBars(container, entries, valueKey='value') {
+      container.replaceChildren();
+      if (!entries.length) { container.append(text('div','暂无数据','empty')); return; }
+      const max = Math.max(...entries.map(x => x[valueKey] || 0), 1);
+      entries.forEach(entry => {
+        const row = text('div','', 'bar-row');
+        row.append(text('span', entry.label));
+        const track = text('div','', 'mini-track'); const fill = text('div','', 'mini-fill');
+        fill.style.width = `${(entry[valueKey] || 0) / max * 100}%`; track.append(fill); row.append(track);
+        row.append(text('span', fmt.format(entry[valueKey] || 0), 'number')); container.append(row);
+      });
+    }
+    function renderIssue(issue) {
+      const item = text('article','', 'item');
+      const head = text('div','', 'item-head');
+      head.append(text('span', typeLabels[issue.type] || issue.type, 'badge'));
+      if (issue.fix_status === 'autofix_applied') head.append(text('span','已修复','badge fixed'));
+      else if (issue.fix_status === 'autofix_rejected') head.append(text('span','候选被拒绝','badge rejected'));
+      else head.append(text('span', issue.fixed ? '已修复' : '仅报告', `badge ${issue.fixed ? 'fixed' : ''}`));
+      head.append(text('span', `第 ${issue.chapter + 1} 章 · 段 ${issue.index} · ${shortTime(issue.ts)}`, 'meta'));
+      item.append(head, text('div', issue.detail || '未提供问题说明', 'reason'));
+      if (issue.suggestion) item.append(text('div', `建议：${issue.suggestion}`, 'suggestion'));
+      const pair = text('div','', 'text-pair');
+      if (issue.source) { const q=text('div','', 'quote source'); q.append(text('span','原文','quote-label'), document.createTextNode(issue.source)); pair.append(q); }
+      if (issue.before) { const q=text('div','', 'quote'); q.append(text('span','修复前','quote-label'), document.createTextNode(issue.before)); pair.append(q); }
+      const after = issue.after || issue.proposed;
+      if (after) { const q=text('div','', 'quote'); q.append(text('span', issue.after ? '修复后' : '候选修复','quote-label'), document.createTextNode(after)); pair.append(q); }
+      if (pair.childNodes.length) item.append(pair); return item;
+    }
+    function renderEvent(event) {
+      const item=text('article','', 'item'); const head=text('div','', 'item-head');
+      head.append(text('span',event.label,'badge')); head.append(text('span',shortTime(event.ts),'meta'));
+      item.append(head, text('div',event.detail || '状态已更新','reason')); return item;
+    }
+    function renderFeed() {
+      const feed=$('feed'); feed.replaceChildren(); if (!state.data) return;
+      const rows=state.view === 'issues' ? state.data.issues : state.data.events;
+      if (!rows.length) { feed.append(text('div','暂无可显示记录','empty')); return; }
+      rows.forEach(row => feed.append(state.view === 'issues' ? renderIssue(row) : renderEvent(row)));
+    }
+    function readerNotice(message) {
+      $('readerNotice').textContent=message;
+      clearTimeout(readerNotice.timer);
+      readerNotice.timer=setTimeout(()=>{ $('readerNotice').textContent=''; },2600);
+    }
+    async function fetchJson(url) {
+      const response=await fetch(url,{cache:'no-store'}); const data=await response.json();
+      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`); return data;
+    }
+    function readerUpdatePreferences() {
+      const r=state.reader;
+      r.fontIndex=((r.fontIndex%READER_FONT_SIZES.length)+READER_FONT_SIZES.length)%READER_FONT_SIZES.length;
+      $('readerView').style.setProperty('--reader-font-size',`${READER_FONT_SIZES[r.fontIndex]}px`);
+      $('readerView').classList.toggle('show-source',r.showSource);
+      $('readerSource').textContent=r.showSource?'隐藏原文':'显示原文';
+      $('readerSource').setAttribute('aria-pressed',String(r.showSource));
+      localStorage.setItem('wenyi.observer.font',String(r.fontIndex));
+      localStorage.setItem('wenyi.observer.source',r.showSource?'1':'0');
+    }
+    function readerUpdateNav() {
+      const chapters=state.reader.book?.chapters || []; const indexes=chapters.filter(c=>c.translated_segments>0).map(c=>c.index);
+      const pos=indexes.indexOf(state.reader.index); const atStart=pos<=0; const atEnd=pos<0||pos>=indexes.length-1;
+      $('readerPrev').disabled=atStart; $('readerBottomPrev').disabled=atStart;
+      $('readerNext').disabled=atEnd; $('readerBottomNext').disabled=atEnd;
+    }
+    function readerRenderBook() {
+      const book=state.reader.book;
+      $('readerTranslation').textContent=`Formal ${book.done_chapters}/${book.chapter_count}`;
+      $('readerReview').textContent=`质量门 ${book.review_done_chapters}/${book.chapter_count}`;
+      $('readerUpdated').textContent=`${fmt.format(book.translated_segments)}/${fmt.format(book.total_segments)} 段已有译文`;
+      const select=$('readerSelect'); select.replaceChildren();
+      book.chapters.filter(ch=>ch.translated_segments>0).forEach(ch=>{
+        const marker=ch.review_status==='done'?'✓':ch.stored_status==='done'?'◐':'…';
+        const option=document.createElement('option'); option.value=String(ch.index);
+        option.textContent=`${marker} ${String(ch.index+1).padStart(2,'0')} · ${ch.title}`; select.append(option);
+      });
+      select.value=String(state.reader.index); readerUpdateNav();
+    }
+    function readerRenderChapter() {
+      const chapter=state.reader.chapter; const content=$('readerContent'); content.replaceChildren();
+      $('readerTitle').textContent=`第 ${chapter.index+1} 章 · ${chapter.title}`;
+      $('readerMeta').textContent=`${chapter.translated_segments}/${chapter.total_segments} 段 · ${chapter.version} · 更新 ${shortTime(chapter.updated_at)}`;
+      chapter.segments.forEach(seg=>{
+        const wrap=text('section','', 'reader-segment');
+        const shown=seg.translated?seg.target:'（等待处理）';
+        const target=text(seg.kind==='heading'?'h3':'p',shown,seg.kind==='heading'?'reader-target reader-heading':'reader-target');
+        const source=text('p',seg.source,'reader-source'); source.lang='ja';
+        wrap.append(target,source); content.append(wrap);
+      });
+      if (!content.childNodes.length) content.append(text('div','本章尚未产生可阅读译文。','reader-empty'));
+      $('readerSelect').value=String(chapter.index); readerUpdateNav();
+      document.title=`${chapter.title} · Wenyi 阅读情节`;
+    }
+    async function readerLoadChapter(index,{preserveScroll=false}={}) {
+      if (state.reader.loading) return; state.reader.loading=true;
+      const oldY=window.scrollY; $('readerRefresh').disabled=true;
+      try {
+        const chapter=await fetchJson(`/api/chapters/${Number(index)}`);
+        state.reader.index=chapter.index; state.reader.chapter=chapter;
+        localStorage.setItem('wenyi.observer.chapter',String(chapter.index)); readerRenderChapter();
+        if (preserveScroll) requestAnimationFrame(()=>window.scrollTo({top:oldY,behavior:'instant'}));
+        else requestAnimationFrame(()=>$('readerView').scrollIntoView({block:'start',behavior:'instant'}));
+      } catch(error) { readerNotice(`章节载入失败：${error.message}`); }
+      finally { state.reader.loading=false; $('readerRefresh').disabled=false; }
+    }
+    async function readerLoadBook({manual=false}={}) {
+      if (state.reader.loading) return; state.reader.loading=true; $('readerRefresh').disabled=true;
+      try {
+        const book=await fetchJson('/api/book'); state.reader.book=book;
+        const readable=book.chapters.filter(ch=>ch.translated_segments>0);
+        if (!readable.some(ch=>ch.index===state.reader.index)) state.reader.index=readable[0]?.index;
+        readerRenderBook();
+        state.reader.loading=false;
+        if (state.reader.index!==undefined) await readerLoadChapter(state.reader.index,{preserveScroll:Boolean(state.reader.chapter)});
+        if (manual) readerNotice('已重新读取最新 Formal / Shadow 与审校状态');
+      } catch(error) { readerNotice(`阅读器载入失败：${error.message}`); }
+      finally { state.reader.loading=false; $('readerRefresh').disabled=false; }
+    }
+    function readerMove(offset) {
+      const indexes=(state.reader.book?.chapters||[]).filter(ch=>ch.translated_segments>0).map(ch=>ch.index);
+      const next=indexes[indexes.indexOf(state.reader.index)+offset]; if (next!==undefined) readerLoadChapter(next);
+    }
+    function switchSurface(surface) {
+      if (surface===state.surface) return;
+      state.surfaceScroll[state.surface]=window.scrollY; state.surface=surface;
+      $('monitorView').hidden=surface!=='monitor'; $('readerView').hidden=surface!=='reader';
+      document.querySelectorAll('.surface-button').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.surface===surface)));
+      if (surface==='reader'&&!state.reader.book) readerLoadBook();
+      if (surface==='monitor') document.title='Wenyi 实时观察器';
+      requestAnimationFrame(()=>window.scrollTo({top:state.surfaceScroll[surface]||0,behavior:'instant'}));
+    }
+    function render(data) {
+      state.data=data; $('book').textContent=data.book || 'Wenyi 实时观察器';
+      const c=data.current; $('stage').textContent=c.stage_label;
+      $('currentHeading').textContent=c.chapter == null ? c.stage_label : `第 ${c.chapter + 1} 章 · ${c.title || '未命名章节'}`;
+      $('currentDesc').textContent=c.explanation; $('precision').textContent=c.precision;
+      const chips=$('modelChips'); chips.replaceChildren();
+      if (c.model) chips.append(text('span',c.model,'chip'));
+      if (c.provider) chips.append(text('span',c.provider,'chip'));
+      chips.append(text('span','只读观察','chip'));
+      const p=data.progress; $('translated').textContent=`${p.translated}/${p.chapters}`; $('reviewed').textContent=`${p.reviewed}/${p.chapters}`;
+      $('issuesCount').textContent=fmt.format(data.quality.issues); $('fixedCount').textContent=fmt.format(data.quality.fixed);
+      setProgress('translationFill','translationValue',p.translated,p.chapters); setProgress('reviewFill','reviewValue',p.reviewed,p.chapters);
+      renderBars($('qualityBars'), Object.entries(data.quality.types).map(([k,v])=>({label:typeLabels[k]||k,value:v})));
+      const stages=Object.entries(data.usage.by_stage || {}).map(([k,v])=>({label:k,value:v.total_tokens||0})).sort((a,b)=>b.value-a.value).slice(0,8);
+      renderBars($('usageBars'),stages);
+      const age=data.last_event_age_seconds; $('freshness').textContent=age == null ? '尚无事件' : `每 2 秒刷新 · 最近落盘 ${age < 60 ? age+' 秒前' : Math.floor(age/60)+' 分钟前'}`;
+      $('visibility').textContent=`可见：${data.visibility.available.join('、')}。${data.visibility.unavailable}`;
+      renderFeed();
+    }
+    async function refresh() {
+      try {
+        const response=await fetch('/api/snapshot?limit=80',{cache:'no-store'}); const data=await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`); render(data);
+      } catch (error) { $('freshness').textContent='连接异常'; const feed=$('feed'); feed.replaceChildren(text('div',String(error),'error')); }
+    }
+    document.querySelectorAll('.tab').forEach(button => button.addEventListener('click',()=>{
+      state.view=button.dataset.view; document.querySelectorAll('.tab').forEach(x=>x.setAttribute('aria-pressed',String(x===button))); renderFeed();
+    }));
+    document.querySelectorAll('.surface-button').forEach(button=>button.addEventListener('click',()=>switchSurface(button.dataset.surface)));
+    $('readerSelect').addEventListener('change',()=>readerLoadChapter($('readerSelect').value));
+    $('readerPrev').addEventListener('click',()=>readerMove(-1)); $('readerBottomPrev').addEventListener('click',()=>readerMove(-1));
+    $('readerNext').addEventListener('click',()=>readerMove(1)); $('readerBottomNext').addEventListener('click',()=>readerMove(1));
+    $('readerRefresh').addEventListener('click',()=>readerLoadBook({manual:true}));
+    $('readerMonitor').addEventListener('click',()=>switchSurface('monitor'));
+    $('readerSource').addEventListener('click',()=>{state.reader.showSource=!state.reader.showSource; readerUpdatePreferences();});
+    $('readerFont').addEventListener('click',()=>{state.reader.fontIndex=(state.reader.fontIndex+1)%READER_FONT_SIZES.length; readerUpdatePreferences(); readerNotice(`正文字号 ${READER_FONT_SIZES[state.reader.fontIndex]}px`);});
+    readerUpdatePreferences();
+    refresh(); setInterval(refresh,2000);
+  </script>
+</body>
+</html>

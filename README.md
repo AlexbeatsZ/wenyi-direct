@@ -47,6 +47,7 @@ uv run wenyi-direct init-config config.yaml
 # edit config.yaml and set the referenced API-key environment variable if needed
 uv run wenyi-direct translate path\to\book.epub --config config.yaml
 uv run wenyi-direct status path\to\book.epub --config config.yaml
+uv run wenyi-direct monitor path\to\book.epub --config config.yaml
 uv run wenyi-direct assemble path\to\book.epub --config config.yaml --format epub
 
 # terminology lifecycle
