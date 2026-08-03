@@ -7,6 +7,13 @@ word sense, and Chinese sentence structure. A cheap draft can anchor later model
 a fluent but incorrect frame, so Wenyi Direct does not create one. The first model
 sees unpolluted source context and produces the candidate directly.
 
+For Japanese source, the translation prompt states general structural risks rather
+than book-specific answers: omitted subjects, nominal fragments, postposed material,
+relative-clause order, discourse function, counters, and the temptation to expand a
+physical meaning for fluency. Literary fragments may keep their rhythm, but they may
+not become invalid Chinese collocations or lose question, command, or quotation
+function.
+
 The project also does not require reading the whole book first. Human translators
 work on serial fiction and newly released chapters all the time. A current chapter,
 nearby source, and a bounded raw tail from completed chapters are enough to translate

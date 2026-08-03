@@ -95,6 +95,19 @@ def test_chinese_reader_has_translation_acceptance_motive_but_no_source() -> Non
     assert "原文章名" not in serialized
 
 
+def test_japanese_translation_guardrails_are_general_not_case_specific() -> None:
+    for principle in (
+        "省略的主语",
+        "话语功能",
+        "连体修饰顺序",
+        "不成立搭配",
+        "不得为了自然或文采擅自扩大",
+    ):
+        assert principle in TRANSLATION_SYSTEM
+    for case_specific_answer in ("光った", "闪光了", "亮了", "第一具猎物"):
+        assert case_specific_answer not in TRANSLATION_SYSTEM
+
+
 def _handler(messages, _tier, _json_mode):
     system = messages[0]["content"]
     payload = _payload(messages)
