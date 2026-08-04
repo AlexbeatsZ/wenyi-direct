@@ -28,13 +28,18 @@ wrong phase.
 `pipeline fast` implements two logical lanes:
 
 ```text
-upstream lane:   translate -> factual-audit -> factual-repair
- downstream lane:             chinese-audit -> chinese-repair -> promote
+warmup:           chapter 0 translate -> factual-audit -> factual-repair
+overlap:          chapter N chinese-audit -> chinese-repair -> promote
+                  chapter N+1 translate -> factual-audit
+after each pair:  chapter N+1 factual-repair
 ```
 
-The scheduler first completes upstream work for the first selected chapter. It then
-runs downstream work for chapter N concurrently with upstream work for chapter N+1.
-After the last upstream chapter completes, the scheduler drains its downstream work.
+The scheduler first completes all upstream work for the first selected chapter. It
+then runs downstream work for chapter N concurrently with translation and factual
+audit for chapter N+1. Only after both lanes complete does it execute chapter N+1
+factual repair. This prevents a terminology migration from rewriting chapter N while
+that chapter is still being Chinese-reviewed. After the final factual repair, the
+scheduler drains the last chapter's downstream work.
 
 This is a true overlap of model calls, not merely interleaved logging. Tests use thread
 barriers to require chapter 0 Chinese Reader execution and chapter 1 factual audit to

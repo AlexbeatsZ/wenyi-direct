@@ -92,12 +92,17 @@ uv run wenyi-direct pipeline fast path\to\book.epub --chapters 0-20 --config con
 This mode uses two model lanes with a one-chapter offset:
 
 ```text
-chapter N:   Chinese audit -> Chinese repair -> promote
-chapter N+1: translate -> factual audit -> factual repair
+concurrently:
+  chapter N:   Chinese audit -> Chinese repair -> promote
+  chapter N+1: translate -> factual audit
+then:
+  chapter N+1: factual repair
 ```
 
-The next chapter may use the previous chapter's completed **factual snapshot** as
-provisional past context while the previous chapter is undergoing Chinese-only review.
+Factual repair is deliberately outside the overlap window because terminology
+migration may rewrite earlier translated chapters. The next chapter may use the
+previous chapter's completed **factual snapshot** as provisional past context while
+the previous chapter is undergoing Chinese-only review.
 It never receives the previous chapter's uncorrected direct draft. Once the previous
 chapter reaches Formal, normal Formal past context is used again.
 
