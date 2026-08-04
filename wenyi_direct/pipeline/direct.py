@@ -14,10 +14,26 @@ from .direct_revision import (
     DirectPipeline as _RevisionDirectPipeline,
     export_json,
 )
+from .term_migration import TermRevision
 
 
 class DirectPipeline(_RevisionDirectPipeline):
     """Revision-aware pipeline plus one bounded Chinese recheck and strict context."""
+
+    @staticmethod
+    def _issue_covered_by_revision(
+        chapter: Chapter,
+        issue: dict[str, Any],
+        revisions: list[TermRevision],
+    ) -> bool:
+        """Discard only a term issue explicitly tied to the migrated source rule."""
+        del chapter
+        if issue.get("type") != "term":
+            return False
+        term_source = str(issue.get("term_source", "")).strip()
+        return bool(term_source) and any(
+            term_source == revision.source for revision in revisions
+        )
 
     def _knowledge_for(
         self, store, chapter: Chapter, read_source: str
