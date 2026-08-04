@@ -6,9 +6,9 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from wenyi_direct.cli import app
+from wenyi_direct.ingest.models import Chapter, Segment
 from wenyi_direct.pipeline.knowledge import TermRule, TerminologyDocument, TerminologyStore
 from wenyi_direct.pipeline.runstore import RunStore
-from wenyi_direct.ingest.models import Chapter, Segment
 
 
 runner = CliRunner()
