@@ -85,6 +85,43 @@ def translate(
 
 
 @app.command()
+def audit(
+    source: Path = typer.Argument(..., exists=True, dir_okay=False),
+    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True),
+    chapters: str | None = typer.Option(
+        None, help="Optional indexes/ranges, e.g. 0,2-4. Default audits all chapters."
+    ),
+    save_terms: bool = typer.Option(
+        False, "--save-terms", help="Whether to save discovered terms to terminology store."
+    ),
+) -> None:
+    """Run factual audit only to inspect issues and terminology suggestions without modifying text."""
+    cfg = _load(config)
+    clients = build_clients(cfg)
+    pipeline = DirectPipeline(cfg, clients, config_dir=config.resolve().parent)
+    store = pipeline.audit(
+        source,
+        chapters=_parse_chapters(chapters),
+        save_discoveries=save_terms,
+    )
+    manifest = store.load_manifest()
+    table = Table(title=f"Audit Output: {manifest['title']}")
+    table.add_column("Chapter", justify="right")
+    table.add_column("Title")
+    table.add_column("Audit Artifact Path")
+    for chapter in manifest["chapters"]:
+        ci = chapter["index"]
+        artifact = store.audit_artifact_path(ci)
+        table.add_row(
+            str(ci),
+            str(chapter.get("title", "")),
+            artifact if Path(artifact).exists() else "No audit log",
+        )
+    console.print(table)
+    console.print(f"Audit logs recorded in: [cyan]{store.artifacts_dir}/audits/[/cyan]")
+
+
+@app.command()
 def status(
     source: Path = typer.Argument(..., exists=True, dir_okay=False),
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True),

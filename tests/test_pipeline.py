@@ -517,3 +517,21 @@ def test_resume_rejects_changed_source_file(tmp_path: Path) -> None:
     source.write_text(source.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="source file changed"):
         pipeline.prepare(source)
+
+
+def test_cli_audit_standalone(tmp_path: Path) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    fake_client = FakeClient(lambda msgs, tier, jmode: '{"issues": [], "term_candidates": []}')
+    config = _config(tmp_path)
+    clients = {
+        role: fake_client
+        for role in ("translate", "factual_audit", "chinese_audit", "repair", "validation")
+    }
+    pipeline = DirectPipeline(config, clients, config_dir=tmp_path)
+    store = pipeline.audit(source)
+    assert store.exists()
+    manifest = store.load_manifest()
+    assert manifest["title"] == "夜の章"
+
+

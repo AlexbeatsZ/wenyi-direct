@@ -153,6 +153,96 @@ class DirectPipeline:
                     self._save_usage(store)
         return store
 
+    def audit(
+        self,
+        source_path: str | Path,
+        *,
+        chapters: set[int] | None = None,
+        save_discoveries: bool = False,
+    ) -> RunStore:
+        store = self.prepare(source_path)
+        with store.lock():
+            manifest = store.load_manifest()
+            all_chapters = [c["index"] for c in manifest["chapters"]]
+            pending = all_chapters if chapters is None else [i for i in all_chapters if i in chapters]
+            for chapter_index in pending:
+                try:
+                    self._audit_chapter_only(store, chapter_index, save_discoveries=save_discoveries)
+                finally:
+                    self._save_usage(store)
+        return store
+
+    def _audit_chapter_only(
+        self, store: RunStore, chapter_index: int, *, save_discoveries: bool = False
+    ) -> list[dict]:
+        chapter = store.load_chapter(chapter_index)
+        shadow = store.load_shadow(chapter_index)
+        if shadow and shadow.get("targets"):
+            targets = self._targets(shadow)
+        else:
+            targets = {segment.index: segment.target or "" for segment in chapter.segments}
+
+        issues: list[dict] = []
+        audit_lengths = {
+            segment.index: len(segment.source) + len(targets.get(segment.index, ""))
+            for segment in chapter.text_segments
+        }
+        for window in self.window_planner.plan(chapter, audit_lengths):
+            source = "\n".join(chapter.segments[index].source for index in window.read_indexes)
+            messages = factual_audit_messages(
+                chapter,
+                window.read_indexes,
+                window.write_indexes,
+                targets,
+                self._knowledge_for(store, chapter, source),
+            )
+            input_ref = store.save_translation_input(
+                {"stage": "factual_audit_only", "messages": messages}
+            )
+            response = self.clients["factual_audit"].complete_json(
+                messages,
+                tier=self.config.pipeline.audit_tier,
+                stage="factual_audit",
+            )
+            parsed = self._parse_issues(
+                chapter,
+                response,
+                set(window.write_indexes),
+                set(window.read_indexes),
+            )
+            issues.extend(parsed)
+            discoveries = (
+                list(response.get("term_candidates", []))
+                if isinstance(response, dict)
+                and isinstance(response.get("term_candidates", []), list)
+                else []
+            )
+            added_terms = []
+            if save_discoveries:
+                added_terms = self.terminology.add_discoveries(
+                    chapter.index,
+                    discoveries,
+                    source,
+                    "\n".join(targets[index] for index in window.read_indexes),
+                )
+            store.record_audit(
+                chapter.index,
+                "factual_audit",
+                {
+                    "input_ref": input_ref,
+                    "issues": parsed,
+                    "term_candidates": discoveries,
+                    "added_terms": [term.model_dump(exclude_none=True) for term in added_terms],
+                },
+            )
+        store.log_event(
+            "factual_audit_only_completed",
+            chapter=chapter.index,
+            issues_count=len(issues),
+            save_discoveries=save_discoveries,
+        )
+        return issues
+
     def _run_chapter(self, store: RunStore, chapter_index: int) -> None:
         chapter = store.load_chapter(chapter_index)
         digest = chapter_source_digest(chapter)
