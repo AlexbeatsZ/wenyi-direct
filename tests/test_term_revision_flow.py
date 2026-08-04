@@ -6,7 +6,7 @@ from pathlib import Path
 from wenyi_direct.config import Config
 from wenyi_direct.llm.providers.fake import FakeClient
 from wenyi_direct.pipeline.direct import DirectPipeline
-from wenyi_direct.pipeline.knowledge import TermRule, TerminologyDocument, TerminologyStore
+from wenyi_direct.pipeline.knowledge import TerminologyDocument, TerminologyStore, TermRule
 from wenyi_direct.pipeline.types import chapter_source_digest, segment_id
 from wenyi_direct.prompts import (
     FIDELITY_SYSTEM,

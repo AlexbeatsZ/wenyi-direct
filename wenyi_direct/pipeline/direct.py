@@ -11,8 +11,10 @@ from ..prompts import (
 )
 from .direct_revision import (
     AlignmentError,
-    DirectPipeline as _RevisionDirectPipeline,
     export_json,
+)
+from .direct_revision import (
+    DirectPipeline as _RevisionDirectPipeline,
 )
 from .term_migration import TermRevision
 

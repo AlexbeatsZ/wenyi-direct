@@ -12,7 +12,8 @@ from ..prompts import (
     term_migration_repair_messages,
     term_revision_validation_messages,
 )
-from .direct_core import AlignmentError, DirectPipeline as _CoreDirectPipeline, export_json
+from .direct_core import AlignmentError, export_json
+from .direct_core import DirectPipeline as _CoreDirectPipeline
 from .term_migration import (
     AmbiguousTermUse,
     TermMigrationService,

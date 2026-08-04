@@ -7,9 +7,8 @@ from typer.testing import CliRunner
 
 from wenyi_direct.cli import app
 from wenyi_direct.ingest.models import Chapter, Segment
-from wenyi_direct.pipeline.knowledge import TermRule, TerminologyDocument, TerminologyStore
+from wenyi_direct.pipeline.knowledge import TerminologyDocument, TerminologyStore, TermRule
 from wenyi_direct.pipeline.runstore import RunStore
-
 
 runner = CliRunner()
 

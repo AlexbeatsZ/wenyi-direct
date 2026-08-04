@@ -327,9 +327,10 @@ def revise_term(
                     config_dir=config.resolve().parent,
                 )
                 pipeline._activate_terminology_for(store)
-                resolver = lambda use, accepted: pipeline._resolve_term_migration_use(
-                    store, use, accepted
-                )
+                def resolver(use, accepted):
+                    return pipeline._resolve_term_migration_use(
+                                    store, use, accepted
+                                )
             result = service.apply(plan, resolver=resolver)
     except TermMigrationNeedsReview as error:
         table = Table(title=f"Ambiguous terminology uses: {error.plan.migration_id}")

@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .knowledge import TermRule, TerminologyStore
+from .knowledge import TerminologyStore, TermRule
 from .runstore import STATUS_DONE, RunStore
 
 StorageKind = Literal["formal", "shadow"]
