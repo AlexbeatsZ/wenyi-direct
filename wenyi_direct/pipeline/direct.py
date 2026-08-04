@@ -24,7 +24,7 @@ from ..prompts import (
 )
 from .knowledge import TerminologyStore
 from .repair import RepairPlanner
-from .runstore import STATUS_DONE, RunStore, slugify
+from .runstore import STATUS_DONE, STATUS_PENDING, RunStore, slugify
 from .types import RepairRegion, TranslationWindow, chapter_source_digest, segment_id
 from .window import WindowPlanner, split_write_scope
 
@@ -34,6 +34,7 @@ class AlignmentError(RuntimeError):
 
 
 _SPEAKER_METADATA_PREFIX_RE = re.compile(r"^\s*【話者：[^】]*】\s*")
+_RESTART_STAGES = {"translate", "factual_audit", "chinese_audit"}
 
 
 def _clean_target_control_metadata(target: str) -> str:
@@ -132,9 +133,20 @@ class DirectPipeline:
         source_path: str | Path,
         *,
         chapters: set[int] | None = None,
+        restart_from: str | None = None,
     ) -> RunStore:
         store = self.prepare(source_path)
         with store.lock():
+            if restart_from is not None:
+                stage = self._normalise_restart_stage(restart_from)
+                manifest = store.load_manifest()
+                known = {int(item["index"]) for item in manifest["chapters"]}
+                selected = known if chapters is None else set(chapters)
+                unknown = selected - known
+                if unknown:
+                    raise ValueError(f"unknown chapter indexes: {sorted(unknown)}")
+                for chapter_index in sorted(selected):
+                    self._restart_chapter(store, chapter_index, stage)
             pending = store.pending_chapters()
             if chapters is not None:
                 pending = [index for index in pending if index in chapters]
@@ -147,6 +159,84 @@ class DirectPipeline:
                     self._save_usage(store)
         return store
 
+    @staticmethod
+    def _normalise_restart_stage(value: str) -> str:
+        stage = value.strip().casefold().replace("-", "_")
+        if stage not in _RESTART_STAGES:
+            raise ValueError(
+                "restart_from must be translate, factual-audit, or chinese-audit"
+            )
+        return stage
+
+    def _restart_chapter(
+        self, store: RunStore, chapter_index: int, stage: str
+    ) -> None:
+        chapter = store.load_chapter(chapter_index)
+        digest = chapter_source_digest(chapter)
+        shadow = store.load_shadow(chapter_index)
+        if stage == "translate":
+            shadow = {
+                "schema": 2,
+                "chapter": chapter_index,
+                "source_digest": digest,
+                "phase": "translate",
+                "targets": {
+                    str(segment.index): (
+                        "" if segment.source.strip() else segment.target or ""
+                    )
+                    for segment in chapter.segments
+                },
+                "translated_ids": [],
+                "stage_snapshots": {},
+            }
+        else:
+            if shadow is None:
+                raise RuntimeError(
+                    f"cannot restart chapter {chapter_index} from {stage}: no shadow exists"
+                )
+            snapshots = shadow.get("stage_snapshots")
+            if not isinstance(snapshots, dict):
+                raise RuntimeError(
+                    f"cannot restart chapter {chapter_index} from {stage}: "
+                    "no stage snapshots exist; restart from translate"
+                )
+            if stage == "factual_audit":
+                if not self.config.pipeline.factual_audit:
+                    raise RuntimeError("factual audit is disabled in the current config")
+                snapshot_name = "direct"
+            else:
+                if not self.config.pipeline.chinese_reader_audit:
+                    raise RuntimeError("Chinese reader audit is disabled in the current config")
+                snapshot_name = (
+                    "factual" if self.config.pipeline.factual_audit else "direct"
+                )
+            snapshot = snapshots.get(snapshot_name)
+            if not isinstance(snapshot, dict):
+                raise RuntimeError(
+                    f"cannot restart chapter {chapter_index} from {stage}: "
+                    f"missing {snapshot_name} snapshot; restart from translate"
+                )
+            shadow["schema"] = 2
+            shadow["source_digest"] = digest
+            shadow["phase"] = stage
+            shadow["targets"] = {str(index): str(target) for index, target in snapshot.items()}
+            shadow.pop("factual_state", None)
+            shadow.pop("chinese_state", None)
+            if stage == "factual_audit":
+                snapshots.pop("factual", None)
+        self._save_shadow(store, chapter_index, shadow)
+        store.set_chapter_fields(
+            chapter_index,
+            status=STATUS_PENDING,
+            phase=stage,
+            error=None,
+        )
+        store.log_event(
+            "chapter_restarted",
+            chapter=chapter_index,
+            restart_from=stage,
+        )
+
     def _run_chapter(self, store: RunStore, chapter_index: int) -> None:
         chapter = store.load_chapter(chapter_index)
         digest = chapter_source_digest(chapter)
@@ -157,7 +247,7 @@ class DirectPipeline:
             )
         if not shadow:
             shadow = {
-                "schema": 1,
+                "schema": 2,
                 "chapter": chapter_index,
                 "source_digest": digest,
                 "phase": "translate",
@@ -165,6 +255,7 @@ class DirectPipeline:
                     str(segment.index): segment.target or "" for segment in chapter.segments
                 },
                 "translated_ids": [],
+                "stage_snapshots": {},
             }
             self._save_shadow(store, chapter_index, shadow)
         self._clean_shadow_control_metadata(store, chapter, shadow)
@@ -258,6 +349,11 @@ class DirectPipeline:
             raise AlignmentError(
                 f"chapter translation incomplete: missing {sorted(expected - completed)}"
             )
+        snapshots = shadow.setdefault("stage_snapshots", {})
+        snapshots["direct"] = dict(shadow["targets"])
+        snapshots.pop("factual", None)
+        shadow.pop("factual_state", None)
+        shadow.pop("chinese_state", None)
         shadow["phase"] = (
             "factual_audit" if self.config.pipeline.factual_audit else "chinese_audit"
         )
@@ -375,6 +471,9 @@ class DirectPipeline:
             )
             self._save_targets(shadow, targets)
             self._save_shadow(store, chapter.index, shadow)
+        snapshots = shadow.setdefault("stage_snapshots", {})
+        snapshots["factual"] = dict(shadow["targets"])
+        shadow.pop("chinese_state", None)
         shadow["phase"] = (
             "chinese_audit" if self.config.pipeline.chinese_reader_audit else "promote"
         )
