@@ -215,6 +215,11 @@ class TerminologyStore:
         return changed
 
     def visible(self, chapter: int, read_source: str) -> dict[str, Any]:
+        """Backward-compatible alias for the translation-stage projection."""
+        return self.visible_for_translation(chapter, read_source)
+
+    def visible_for_translation(self, chapter: int, read_source: str) -> dict[str, Any]:
+        """Project enforceable hard rules and soft preferences to a generation call."""
         matches = self._selected_matches(chapter, read_source)
         hard: list[dict[str, Any]] = []
         preferred: list[dict[str, Any]] = []
@@ -236,6 +241,30 @@ class TerminologyStore:
             "hard_terms": hard,
             "preferred_terms": preferred,
         }
+
+    def visible_for_audit(self, chapter: int, read_source: str) -> dict[str, Any]:
+        """Show current conventions as evidence that an auditor may challenge."""
+        conventions: list[dict[str, Any]] = []
+        for term, _count in self._selected_matches(chapter, read_source):
+            item: dict[str, Any] = {
+                "source": term.source,
+                "current_target": term.target,
+                "current_mode": term.mode,
+                "current_status": term.status,
+                "valid_from": term.valid_from,
+                "valid_to": term.valid_to,
+                "challengeable": True,
+            }
+            if term.group_id:
+                group = self.groups[term.group_id]
+                item["group"] = {
+                    "source_anchor": group.source_anchor,
+                    "target_anchor": group.target_anchor,
+                }
+            if term.pronoun:
+                item["pronoun"] = term.pronoun
+            conventions.append(item)
+        return {"current_terminology": conventions}
 
     def hard_violations(
         self, chapter: int, source: str, target: str
@@ -290,7 +319,7 @@ class TerminologyStore:
         source_text: str,
         target_text: str,
     ) -> list[TermRule]:
-        """Activate non-conflicting discoveries as soft hints; retain conflicts as candidates."""
+        """Activate final-text-confirmed discoveries as soft hints."""
         added: list[TermRule] = []
         terms = list(self.terms)
         for discovery in discoveries:
