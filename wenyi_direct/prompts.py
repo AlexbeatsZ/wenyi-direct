@@ -26,7 +26,7 @@ REPAIR_SYSTEM = """你是文学翻译修复者。根据给出的审校问题，�
 先重新理解区域原文及邻近上下文，再写自然中文；不要只替换被点名的词。active hard 术语必须采用，preferred 仅供参考；若审校反馈把 preferred 误当成强制要求，必须以当前源文语义为准。只能输出允许写入的稳定 ID，数量必须完全一致。"""
 
 FIDELITY_SYSTEM = """你是严格的源文忠实度验证员。逐一检查每个 changed=true 的稳定 ID，判断候选中文是否在给定上下文中准确、完整，且没有凭空增加事实；任何一个 changed ID 不合格，整体 valid 必须为 false。
-自然的中文重组不是错误。检查 active hard 术语和代词提示；preferred 只是历史译法建议，不是质量门，不得仅因候选未采用 preferred 就判为不合格或要求改回。只有当前源文证据或 active hard 规则能构成术语类否决依据。若不合格，给出可以直接指导下一次修复的简短问题。"""
+自然的中文重组不是错误。current_terminology 只是现行译法约定，不是不可质疑的真理；若当前源文明确表明现行译名错误、范围过宽或语义不适用，应据此报告，而不是要求候选盲目改回。preferred 更不能作为质量门。若不合格，给出可以直接指导下一次修复的简短问题。"""
 
 # Deliberately contains no translation instructions and receives no source material.
 CHINESE_READER_SYSTEM = """你负责机器翻译文稿上线前的中文阅读验收。你的任务不是普通文学鉴赏，而是阻止“语法勉强可解析，但真实中文中不成立”的译文进入成品。
@@ -35,7 +35,7 @@ CHINESE_READER_SYSTEM = """你负责机器翻译文稿上线前的中文阅读�
 通读上下文后，只报告确实影响理解、自然度、人物声音或连贯性的具体问题。问题可能由邻近多段共同造成。"""
 
 CHINESE_FINDING_VALIDATION_SYSTEM = """你负责判断中文读者指出的问题能否在不损害原意的前提下修复。
-结合邻近上下文确定问题是否真实、所需含义和完整修复范围。若只是合理风格差异，标记为不应修复。"""
+结合邻近上下文确定问题是否真实、所需含义和完整修复范围。current_terminology 只是可质疑的现行约定；若原文证据与其冲突，不得为了维持旧译名而否决真实问题。若只是合理风格差异，标记为不应修复。"""
 
 
 def _source_rows(chapter: Chapter, indexes: tuple[int, ...], write: set[int]) -> list[dict]:
@@ -50,6 +50,29 @@ def _source_rows(chapter: Chapter, indexes: tuple[int, ...], write: set[int]) ->
         }
         for index in indexes
     ]
+
+
+def _challengeable_knowledge(knowledge: dict | None) -> dict:
+    """Downgrade generation constraints to challengeable conventions for reviewers."""
+    original = dict(knowledge or {})
+    conventions = list(original.pop("current_terminology", []) or [])
+    for mode, key in (("hard", "hard_terms"), ("preferred", "preferred_terms")):
+        for item in original.pop(key, []) or []:
+            if not isinstance(item, dict):
+                continue
+            convention = {
+                "source": item.get("source"),
+                "current_target": item.get("target"),
+                "current_mode": mode,
+                "current_status": "active",
+                "challengeable": True,
+            }
+            for optional in ("group", "pronoun", "valid_from", "valid_to"):
+                if optional in item:
+                    convention[optional] = item[optional]
+            conventions.append(convention)
+    original["current_terminology"] = conventions
+    return original
 
 
 def translation_messages(
@@ -91,7 +114,7 @@ def factual_audit_messages(
 ) -> list[dict[str, str]]:
     payload = {
         "chapter": {"index": chapter.index, "title": chapter.title},
-        "knowledge": knowledge,
+        "knowledge": _challengeable_knowledge(knowledge),
         "segments": [
             {
                 **row,
@@ -183,7 +206,7 @@ def chinese_finding_validation_messages(
 ) -> list[dict[str, str]]:
     payload = {
         "reader_issues": issues,
-        "knowledge": knowledge or {},
+        "knowledge": _challengeable_knowledge(knowledge),
         "segments": [
             {
                 "id": segment_id(chapter.index, chapter.segments[index]),
@@ -290,7 +313,7 @@ def fidelity_validation_messages(
     knowledge: dict,
 ) -> list[dict[str, str]]:
     payload = {
-        "knowledge": knowledge,
+        "knowledge": _challengeable_knowledge(knowledge),
         "segments": [
             {
                 "id": segment_id(chapter.index, chapter.segments[index]),
