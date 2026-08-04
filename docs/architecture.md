@@ -64,7 +64,9 @@ makes the requested reading order mechanical:
 3. repair only findings that can be fixed without changing meaning.
 
 The reported segment is a symptom, not an assumed repair boundary. `RepairPlanner`
-combines the symptom, any causal range, neighboring context, and overlapping issues.
+combines the symptom, any model-approved causal range, and overlapping issues into the
+write scope. Neighboring segments are added only to the read scope; context is never
+silently converted into permission to rewrite more text.
 
 ## State and recovery
 
@@ -74,9 +76,18 @@ addressed under `artifacts/inputs/`; translation proposals and accepted stages a
 append-only JSONL, as are audits and events. A crash can repeat an audit but cannot
 expose a half-reviewed chapter as final output.
 
+Each shadow records a fingerprint of model routing, pipeline configuration, prompt
+contracts, and the current terminology snapshot. Resuming after one of those changes
+invalidates downstream review checkpoints while preserving already completed direct
+translation. Low-level JSON and document exporters independently reject incomplete
+Formal state; this is not only a CLI check.
+
 ## Terminology
 
-`terminology.yaml` contains only `groups` and `terms`. A group stores the source and
+The configured `terminology.yaml` is the seed for a new book. Each run copies that
+seed to `state/<book>/terminology.yaml`; model discoveries are written only to this
+book-local snapshot and cannot contaminate another book. A terminology document
+contains only `groups` and `terms`. A group stores the source and
 target fragments shared by explicitly linked expressions; it is not a person, place,
 event, or entity record. Terms are retrieved only when active, within their optional
 chapter range, and actually present in the current source scope. Longer matches take
@@ -95,7 +106,9 @@ source expression is present in the current read scope and does not create an ac
 character, speaker, or cross-window coreference tracker.
 
 Hard terminology is deterministically checked after repair and again before Formal
-promotion. Repair and fidelity-validation prompts receive the same current
+promotion. A violation found at promotion enters the same repair and fidelity gate,
+even when optional audits are disabled; resuming cannot loop on an unchanged
+promotion error. Repair and fidelity-validation prompts receive the same current
 terminology snapshot as direct translation and factual audit. The Chinese Reader
 Audit remains Chinese-only and therefore receives none of it.
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from typing import Optional
@@ -46,11 +47,11 @@ _ROLE_LABELS = {
     "assistant": "Assistant",
     "tool": "Tool result",
 }
-_TEXT_ONLY_REQUIREMENT = (
-    "Execution constraint:\n"
-    "This is a self-contained text task. Answer directly from the prompt. "
-    "Do not call any tools, inspect files, browse, run commands, or use "
-    "write_file. Return the answer only in the response text."
+_REQUEST_FILE_NAME = "request.txt"
+_FILE_PROMPT = (
+    f"Read the UTF-8 file {_REQUEST_FILE_NAME} in the current workspace. "
+    "Follow its instructions exactly. Do not read any other file. "
+    "Return the requested answer in the response text."
 )
 _JSON_REQUIREMENT = (
     "Output requirement:\n"
@@ -65,7 +66,7 @@ def format_agy_prompt(messages: Messages, *, json_mode: bool = False) -> str:
     agy 1.0.x 没有单次 system prompt 参数，因此 ``System`` 只是明确标注的
     普通提示词前缀，不冒充原生 system 消息。
     """
-    sections: list[str] = [_TEXT_ONLY_REQUIREMENT]
+    sections: list[str] = []
     for message in messages:
         content = str(message.get("content", "")).strip()
         if not content:
@@ -184,7 +185,11 @@ class AgyClient(LLMClient):
             else _model_candidates(model)
         )
         try:
-            with self._process_lock:
+            with self._process_lock, tempfile.TemporaryDirectory(
+                prefix="wenyi-direct-agy-"
+            ) as request_dir:
+                request_path = Path(request_dir) / _REQUEST_FILE_NAME
+                request_path.write_text(prompt, encoding="utf-8", newline="\n")
                 completed = False
                 for index, candidate in enumerate(candidates):
                     attempts = (
@@ -195,13 +200,11 @@ class AgyClient(LLMClient):
                     for attempt in range(attempts):
                         unknown_model = False
                         for response_attempt in range(_TEXT_RESPONSE_ATTEMPTS):
-                            retry_note = ""
+                            request_instruction = _FILE_PROMPT
                             if response_attempt:
-                                retry_note = (
-                                    "\n\nCritical retry instruction: Your previous "
-                                    "attempt incorrectly requested a tool. Do not use "
-                                    "tools. Produce the requested response as plain "
-                                    "response text now."
+                                request_instruction += (
+                                    " Your previous attempt did not return the requested "
+                                    "response. Read the request file again and answer now."
                                 )
                             args = [
                                 self.command,
@@ -209,14 +212,18 @@ class AgyClient(LLMClient):
                                 candidate,
                                 "--mode",
                                 "plan",
+                                "--sandbox",
+                                "--dangerously-skip-permissions",
+                                "--disable-slash-commands",
+                                "--new-project",
                                 "--print-timeout",
                                 f"{self.timeout}s",
                                 "--print",
-                                prompt + retry_note,
+                                request_instruction,
                             ]
                             result = subprocess.run(
                                 args,
-                                cwd=self.cwd,
+                                cwd=request_dir,
                                 env=self.env,
                                 capture_output=True,
                                 text=True,
@@ -262,8 +269,8 @@ class AgyClient(LLMClient):
         except FileNotFoundError as exc:
             if getattr(exc, "winerror", None) == 206:
                 raise RuntimeError(
-                    "agy 提示词超过 Windows 命令行上限；"
-                    "请减小 window.max_read_chars、max_write_chars 或上下文注入量"
+                    "agy CLI 启动参数超过 Windows 命令行上限；"
+                    "业务提示已通过临时文件传输，因此请检查 command 或环境路径"
                 ) from exc
             raise RuntimeError(
                 f"找不到 agy CLI：{self.command!r}；请先安装并确认其位于 PATH"

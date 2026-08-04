@@ -65,6 +65,8 @@ class WindowConfig(BaseModel):
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"window.{name} must be positive")
+        if self.max_write_chars > self.max_read_chars:
+            raise ValueError("window.max_write_chars cannot exceed max_read_chars")
         return self
 
 
@@ -114,6 +116,13 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_roles(self) -> "Config":
+        target = self.target_lang.casefold().replace("_", "-")
+        if target not in {"zh", "zh-cn", "zh-hans"}:
+            raise ValueError(
+                "Wenyi Direct currently emits Simplified Chinese only; "
+                "target_lang must be zh-CN"
+            )
+        self.target_lang = "zh-CN"
         if not self.providers:
             raise ValueError("providers must define at least one model provider")
         for role, provider_name in self.roles.model_dump().items():

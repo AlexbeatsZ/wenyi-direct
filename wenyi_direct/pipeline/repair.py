@@ -1,4 +1,4 @@
-"""Convert scattered audit symptoms into causal, context-expanded repair regions."""
+"""Convert audit symptoms into precise write regions with separate read halos."""
 
 from __future__ import annotations
 
@@ -18,11 +18,8 @@ class RepairPlanner:
             symptom_end = int(issue.get("end", symptom_start))
             cause_start = int(issue.get("cause_start", symptom_start))
             cause_end = int(issue.get("cause_end", symptom_end))
-            start = max(0, min(symptom_start, cause_start) - self.context_segments)
-            end = min(
-                segment_count - 1,
-                max(symptom_end, cause_end) + self.context_segments,
-            )
+            start = max(0, min(symptom_start, cause_start))
+            end = min(segment_count - 1, max(symptom_end, cause_end))
             raw_regions.append(RepairRegion(start, end, (issue,)))
         raw_regions.sort(key=lambda region: (region.start, region.end))
         merged: list[RepairRegion] = []
@@ -37,3 +34,12 @@ class RepairPlanner:
                 previous.issues + region.issues,
             )
         return merged
+
+    def read_bounds(self, region: RepairRegion, segment_count: int) -> tuple[int, int]:
+        """Expand context for reading without silently widening writable scope."""
+        if segment_count <= 0:
+            raise ValueError("segment_count must be positive")
+        return (
+            max(0, region.start - self.context_segments),
+            min(segment_count - 1, region.end + self.context_segments),
+        )

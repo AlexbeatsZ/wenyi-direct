@@ -1215,6 +1215,7 @@ def assemble(
     preserve_source_style=True 时原文继承原书正文样式，不注入淡化 CSS。
     about_page=True 时在书末附加“关于此翻译”说明页。
     """
+    store.require_formal_complete()
     if out_format not in _OUT_EXT:
         supported = " / ".join(_OUT_EXT)
         raise ValueError(f"不支持的输出格式：{out_format}（支持 {supported}）")

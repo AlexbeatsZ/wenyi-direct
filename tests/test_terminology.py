@@ -232,6 +232,64 @@ def test_hard_term_is_repaired_even_when_model_audit_reports_no_issue(
     assert store.load_chapter(0).segments[0].target == "亮了。"
 
 
+def test_promotion_repairs_hard_term_when_optional_audits_are_disabled(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "promotion-book.json"
+    source.write_text(
+        json.dumps(
+            {
+                "title": "test",
+                "chapters": [
+                    {"title": "c0", "segments": [{"source": "ブラックホーク"}]}
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    terminology = TerminologyStore(tmp_path / "terminology.yaml")
+    terminology.add_term(
+        TermRule(source="ブラックホーク", target="「黑鹰」直升机", mode="hard")
+    )
+
+    def handler(messages, _tier, _json_mode):
+        system = messages[0]["content"]
+        payload = json.loads(messages[-1]["content"].split("\n", 1)[1])
+        if system == TRANSLATION_SYSTEM:
+            stable_id = payload["required_output"]["translations"][0]["id"]
+            return json.dumps(
+                {"translations": [{"id": stable_id, "target": "黑鹰"}]},
+                ensure_ascii=False,
+            )
+        if system == REPAIR_SYSTEM:
+            assert payload["issues"][0]["hard_terminology"]["required_target"] == "「黑鹰」直升机"
+            stable_id = payload["required_output"]["translations"][0]["id"]
+            return json.dumps(
+                {
+                    "translations": [
+                        {"id": stable_id, "target": "「黑鹰」直升机"}
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        if system == FIDELITY_SYSTEM:
+            return json.dumps({"valid": True, "issues": []})
+        raise AssertionError(system)
+
+    config = _minimal_config(tmp_path)
+    config.pipeline.factual_audit = False
+    config.pipeline.chinese_reader_audit = False
+    fake = FakeClient(handler)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+
+    store = pipeline.run(source)
+    assert store.load_chapter(0).segments[0].target == "「黑鹰」直升机"
+    assert store.load_manifest()["chapters"][0]["status"] == "done"
+
+
 def test_hard_term_violation_blocks_formal_promotion(tmp_path: Path) -> None:
     source = tmp_path / "book.json"
     source.write_text(
@@ -270,6 +328,81 @@ def test_hard_term_violation_blocks_formal_promotion(tmp_path: Path) -> None:
         pipeline.run(source)
     formal = pipeline.store_for(source).load_chapter(0)
     assert formal.segments[0].target is None
+
+
+def test_failed_promotion_resumes_with_policy_invalidation_and_repairs(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "resume-book.json"
+    source.write_text(
+        json.dumps(
+            {
+                "title": "test",
+                "chapters": [
+                    {"title": "c0", "segments": [{"source": "ブラックホーク"}]}
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    terminology = TerminologyStore(tmp_path / "terminology.yaml")
+    terminology.add_term(
+        TermRule(source="ブラックホーク", target="「黑鹰」直升机", mode="hard")
+    )
+    config = _minimal_config(tmp_path)
+    config.pipeline.factual_audit = False
+    config.pipeline.chinese_reader_audit = False
+    config.pipeline.max_repair_attempts = 1
+
+    def failing(messages, _tier, _json_mode):
+        payload = json.loads(messages[-1]["content"].split("\n", 1)[1])
+        stable_id = payload["required_output"]["translations"][0]["id"]
+        return json.dumps(
+            {"translations": [{"id": stable_id, "target": "黑鹰"}]},
+            ensure_ascii=False,
+        )
+
+    failed_client = FakeClient(failing)
+    failed_pipeline = DirectPipeline(
+        config,
+        {role: failed_client for role in config.roles.model_dump()},
+        config_dir=tmp_path,
+    )
+    with pytest.raises(RuntimeError, match="terminology_repair failed"):
+        failed_pipeline.run(source)
+
+    config.pipeline.repair_context_segments = 1
+
+    def recovering(messages, _tier, _json_mode):
+        system = messages[0]["content"]
+        payload = json.loads(messages[-1]["content"].split("\n", 1)[1])
+        if system == REPAIR_SYSTEM:
+            stable_id = payload["required_output"]["translations"][0]["id"]
+            return json.dumps(
+                {
+                    "translations": [
+                        {"id": stable_id, "target": "「黑鹰」直升机"}
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        if system == FIDELITY_SYSTEM:
+            return json.dumps({"valid": True, "issues": []})
+        raise AssertionError("completed translation must be resumed, not repeated")
+
+    recovered_client = FakeClient(recovering)
+    recovered_pipeline = DirectPipeline(
+        config,
+        {role: recovered_client for role in config.roles.model_dump()},
+        config_dir=tmp_path,
+    )
+    store = recovered_pipeline.run(source)
+
+    assert store.load_chapter(0).segments[0].target == "「黑鹰」直升机"
+    assert "shadow_policy_invalidated" in Path(store.event_log_path).read_text(
+        encoding="utf-8"
+    )
 
 
 def test_cli_manages_group_term_and_status(tmp_path: Path) -> None:
@@ -324,3 +457,27 @@ def test_cli_manages_group_term_and_status(tmp_path: Path) -> None:
     assert activated.exit_code == 0, activated.output
     store = TerminologyStore.load(tmp_path / "terminology.yaml")
     assert store.terms[0].status == "active"
+
+
+def test_discovery_is_bounded_before_a_scheduled_future_term(tmp_path: Path) -> None:
+    store = TerminologyStore(tmp_path / "future-terminology.yaml")
+    store.add_term(
+        TermRule(
+            source="コード",
+            target="代号",
+            mode="hard",
+            status="active",
+            valid_from=5,
+        )
+    )
+    added = store.add_discoveries(
+        2,
+        [{"source": "コード", "target": "代码"}],
+        "コード",
+        "代码",
+    )
+
+    assert len(added) == 1
+    assert added[0].status == "active"
+    assert added[0].valid_from == 2
+    assert added[0].valid_to == 4

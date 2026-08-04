@@ -26,6 +26,8 @@ providers:
   # gemini:
   #   provider: agy
   #   command: agy
+  #   cwd: C:/path/to/dedicated/agy-runtime
+  #   isolate_user_config: true
   #   tiers:
   #     strong: {model: gemini-3.1-pro-high}
 

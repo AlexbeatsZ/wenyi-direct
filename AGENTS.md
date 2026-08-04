@@ -14,6 +14,8 @@ promotion to the final text.
   a prerequisite.
 - Keep read scope and write scope separate. The model may see a full chapter or a
   source halo, but it may only return the explicitly requested stable segment IDs.
+  Repair context expands read scope only; writable IDs require an audited or
+  source-validated causal range.
 - The Chinese-reader audit receives Chinese reader-visible text only. Source text,
   glossaries, model analysis, and translation instructions must not enter that call.
 - A Chinese-reader finding is only repairable after a separate source-aware
@@ -28,6 +30,10 @@ promotion to the final text.
   checks after repair and before Formal promotion.
 - Codex CLI business calls must remain ephemeral, read-only, and isolated from user
   rules. API keys belong in environment variables, never YAML or Git.
+- Agy CLI business prompts use an isolated per-call UTF-8 temporary TXT file and a
+  short sandboxed argv instruction; never put full chapter prompts on Windows argv.
+- Model-discovered terminology is book-local state. Shared terminology configuration
+  seeds new runs but is not mutated by translation.
 
 ## Development and verification
 

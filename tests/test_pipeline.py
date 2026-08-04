@@ -11,7 +11,7 @@ from wenyi_direct.cli import app
 from wenyi_direct.config import Config
 from wenyi_direct.ingest.models import Chapter, Segment
 from wenyi_direct.llm.providers.fake import FakeClient
-from wenyi_direct.pipeline.direct import AlignmentError, DirectPipeline
+from wenyi_direct.pipeline.direct import AlignmentError, DirectPipeline, export_json
 from wenyi_direct.pipeline.types import segment_id
 from wenyi_direct.prompts import (
     CHINESE_FINDING_VALIDATION_SYSTEM,
@@ -21,6 +21,7 @@ from wenyi_direct.prompts import (
     REPAIR_SYSTEM,
     TRANSLATION_SYSTEM,
     chinese_reader_messages,
+    translation_messages,
 )
 from wenyi_direct.validate import validate_epub
 
@@ -108,6 +109,28 @@ def test_japanese_translation_guardrails_are_general_not_case_specific() -> None
     for case_specific_answer in ("光った", "闪光了", "亮了", "第一具猎物"):
         assert case_specific_answer not in TRANSLATION_SYSTEM
     assert "不得仅因候选未采用 preferred" in FIDELITY_SYSTEM
+    assert "逐一检查每个 changed=true" in FIDELITY_SYSTEM
+    assert "条目数、ID 集合和顺序" in TRANSLATION_SYSTEM
+    assert "词典义直拼" in FACTUAL_AUDIT_SYSTEM
+
+
+def test_model_prompt_projection_excludes_renderer_metadata() -> None:
+    chapter = Chapter(
+        index=0,
+        title="章",
+        segments=[
+            Segment(
+                index=0,
+                source="続く。",
+                cont=True,
+                meta={"epub_inline": {"nodes": ["renderer-only-secret"]}},
+            )
+        ],
+    )
+    messages = translation_messages(chapter, (0,), (0,), {})
+    payload = _payload(messages)
+    assert payload["segments"][0]["continuation"] is True
+    assert "renderer-only-secret" not in json.dumps(messages, ensure_ascii=False)
 
 
 def _handler(messages, _tier, _json_mode):
@@ -243,6 +266,8 @@ def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) ->
     assert discovered.mode == "preferred"
     assert discovered.status == "active"
     assert discovered.valid_from == 0
+    assert not (tmp_path / "terminology.yaml").exists()
+    assert (Path(store.run_dir) / "terminology.yaml").exists()
 
     chinese_calls = [
         call for call in fake.calls if call["messages"][0]["content"] == CHINESE_READER_SYSTEM
@@ -376,16 +401,52 @@ def test_audit_id_digest_copy_error_is_recovered_but_unknown_segment_is_rejected
             }
         ]
     }
-    parsed = pipeline._parse_issues(chapter, response, {0})
+    parsed = pipeline._parse_issues(chapter, response, {0}, {0})
     assert parsed[0]["start"] == 0
 
     response["issues"][0]["start_id"] = "ch3:s0"
-    parsed = pipeline._parse_issues(chapter, response, {0})
+    parsed = pipeline._parse_issues(chapter, response, {0}, {0})
     assert parsed[0]["start"] == 0
 
     response["issues"][0]["start_id"] = "ch3:s99:wrongdigest"
     with pytest.raises(AlignmentError, match="unknown stable ID"):
-        pipeline._parse_issues(chapter, response, {0})
+        pipeline._parse_issues(chapter, response, {0}, {0})
+
+
+def test_audit_and_reader_validation_cannot_escape_visible_scope(tmp_path: Path) -> None:
+    pipeline = DirectPipeline(_config(tmp_path), {}, config_dir=tmp_path)
+    chapter = Chapter(
+        index=0,
+        title="章",
+        segments=[Segment(index=index, source=f"source-{index}") for index in range(8)],
+    )
+    response = {
+        "issues": [
+            {
+                "start_id": "ch0:s2",
+                "end_id": "ch0:s7",
+                "type": "other",
+                "detail": "range typo",
+            }
+        ]
+    }
+    with pytest.raises(AlignmentError, match="outside the visible read scope"):
+        pipeline._parse_issues(chapter, response, {2}, {1, 2, 3})
+
+    original = [{"finding_id": "f0", "start": 2, "end": 2, "detail": "x"}]
+    validation = {
+        "results": [
+            {
+                "finding_id": "f0",
+                "safe_to_repair": True,
+                "repair_start_id": "ch0:s0",
+                "repair_end_id": "ch0:s7",
+                "required_meaning": "x",
+            }
+        ]
+    }
+    with pytest.raises(AlignmentError, match="outside the visible read scope"):
+        pipeline._parse_reader_validations(chapter, validation, original, {1, 2, 3})
 
 
 def test_synthetic_speaker_metadata_never_enters_target(tmp_path: Path) -> None:
@@ -433,6 +494,18 @@ def test_cli_prepare_and_status_need_no_model_credentials(tmp_path: Path) -> Non
     status = runner.invoke(app, ["status", str(source), "--config", str(config_path)])
     assert status.exit_code == 0, status.output
     assert "0/2 formal chapters complete" in status.output
+
+
+def test_low_level_exports_reject_incomplete_formal_state(tmp_path: Path) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    pipeline = DirectPipeline(_config(tmp_path), {}, config_dir=tmp_path)
+    store = pipeline.prepare(source)
+
+    with pytest.raises(RuntimeError, match="formal translation is incomplete"):
+        export_json(store, tmp_path / "incomplete.json")
+    with pytest.raises(RuntimeError, match="formal translation is incomplete"):
+        assemble(store, str(source), str(tmp_path / "incomplete.epub"))
 
 
 def test_resume_rejects_changed_source_file(tmp_path: Path) -> None:

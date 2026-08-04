@@ -35,15 +35,21 @@ providers:
   gemini:
     provider: agy
     command: agy
+    cwd: C:/path/to/dedicated/agy-runtime
+    isolate_user_config: true
     timeout: 1200
     tiers:
       strong:
         model: gemini-3.1-pro-high
 ```
 
-The adapter uses a fresh non-interactive `--print` request and serializes processes
-to avoid contention in Agy's local state. `isolate_user_config: true` additionally
-requires a dedicated `cwd` and gives the child isolated HOME/USERPROFILE state.
+The adapter writes the complete business prompt to a per-call UTF-8 temporary TXT
+file. Only a short instruction and file name enter `--print`, so full-chapter prompts
+cannot exceed Windows' command-line limit. Each call uses a fresh temporary workspace,
+`--new-project`, sandbox restrictions, disabled slash expansion, and serialized
+process access. `isolate_user_config: true` additionally requires a dedicated `cwd`
+and gives the child isolated HOME/USERPROFILE state; it is recommended for every Agy
+provider and is mechanically exercised by the provider tests.
 
 ## OpenAI-compatible Chat Completions
 

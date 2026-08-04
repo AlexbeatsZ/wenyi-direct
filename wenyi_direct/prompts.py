@@ -13,16 +13,18 @@ TRANSLATION_SYSTEM = """你是中文文学译者。忠实理解整个可见语�
 允许利用只读上下文判断后置主语、说话者、指代和多义词，但不得把当前位置尚未揭示的信息提前写进译文。
 源文为日语时，先还原省略的主语、动作承担者、句间关系和对话功能，再按中文重组；不照搬日语的名词句、连体修饰顺序、后置补充或词性。普通词根据当前语境和话语功能选择中文说法，不把词典义机械拼成台词或描写。可以保留短句和破碎节奏，但不能因此留下主谓错位、不成立搭配或失去问句、命令、引语层级等交际功能。按中文习惯处理量词和标点，同时不得为了自然或文采擅自扩大动作、距离、程度、物理含义或设定。
 active hard 术语必须采用；active preferred 术语只是建议，以自然准确为先。pronoun=neutral 时不要主动补出他或她。保留段落意义和顺序，不合并、拆分或遗漏待写段。
-输入中的说话者提示、控制标记和范围标签只用于理解，不得擅自写进译文。"""
+输入中的说话者提示、控制标记和范围标签只用于理解，不得擅自写进译文。
+输出 translations 的条目数、ID 集合和顺序必须与 required_output 完全一致；READ_ONLY 段不得输出。"""
 
 FACTUAL_AUDIT_SYSTEM = """你是文学翻译的事实审校员。逐项比较原文与中文，检查误译、漏译、增译、指代、主语、说话者、时态、否定、数量、术语和跨段语义关系。
 只报告有原文证据的问题。定位症状段，也定位造成问题的最早/最晚因果段；问题可能跨越多段。不要做纯粹的文风润色。
-可顺便提取明确的专名、设定名、稳定称呼，以及在本作中反复承担固定指称或固定翻译作用的普通名词短语。不要仅因词频高就抽取普通词；多义动词、形容词和描写词只有在当前语义条件明确、确实形成稳定设定表达时才可提出。"""
+可顺便提取明确的专名、设定名、稳定称呼，以及在本作中反复承担固定指称或固定翻译作用的普通名词短语。不要仅因词频高就抽取普通词；多义动词、形容词和描写词只有在当前语义条件明确、确实形成稳定设定表达时才可提出。
+短句也必须检查词典义直拼造成的不成立中文搭配，并依据上下文中的话语功能判断是否误译；不要因为字数少就略过。"""
 
 REPAIR_SYSTEM = """你是文学翻译修复者。根据给出的审校问题，在完整修复区域内统一改写。
 先重新理解区域原文及邻近上下文，再写自然中文；不要只替换被点名的词。active hard 术语必须采用，preferred 仅供参考；若审校反馈把 preferred 误当成强制要求，必须以当前源文语义为准。只能输出允许写入的稳定 ID，数量必须完全一致。"""
 
-FIDELITY_SYSTEM = """你是严格的源文忠实度验证员。判断候选中文是否在给定上下文中准确、完整，且没有凭空增加事实。
+FIDELITY_SYSTEM = """你是严格的源文忠实度验证员。逐一检查每个 changed=true 的稳定 ID，判断候选中文是否在给定上下文中准确、完整，且没有凭空增加事实；任何一个 changed ID 不合格，整体 valid 必须为 false。
 自然的中文重组不是错误。检查 active hard 术语和代词提示；preferred 只是历史译法建议，不是质量门，不得仅因候选未采用 preferred 就判为不合格或要求改回。只有当前源文证据或 active hard 规则能构成术语类否决依据。若不合格，给出可以直接指导下一次修复的简短问题。"""
 
 # Deliberately contains no translation instructions and receives no source material.
@@ -43,7 +45,7 @@ def _source_rows(chapter: Chapter, indexes: tuple[int, ...], write: set[int]) ->
             "scope": "WRITE" if index in write else "READ_ONLY",
             "kind": by_index[index].kind,
             "source": by_index[index].source,
-            "context_meta": by_index[index].meta,
+            "continuation": by_index[index].cont,
         }
         for index in indexes
     ]
@@ -175,9 +177,11 @@ def chinese_finding_validation_messages(
     targets: dict[int, str],
     issues: list[dict],
     read_indexes: tuple[int, ...],
+    knowledge: dict | None = None,
 ) -> list[dict[str, str]]:
     payload = {
         "reader_issues": issues,
+        "knowledge": knowledge or {},
         "segments": [
             {
                 "id": segment_id(chapter.index, chapter.segments[index]),
@@ -219,8 +223,32 @@ def repair_messages(
     knowledge: dict,
     feedback: list[dict] | None = None,
 ) -> list[dict[str, str]]:
+    def issue_view(issue: dict) -> dict:
+        allowed = (
+            "finding_id",
+            "type",
+            "detail",
+            "evidence",
+            "required_meaning",
+            "constraints",
+            "reason",
+            "start_id",
+            "end_id",
+            "cause_start_id",
+            "cause_end_id",
+        )
+        view = {key: issue[key] for key in allowed if key in issue}
+        violation = issue.get("terminology_violation")
+        if isinstance(violation, dict):
+            view["hard_terminology"] = {
+                key: violation[key]
+                for key in ("source", "required_target")
+                if key in violation
+            }
+        return view
+
     payload = {
-        "issues": issues,
+        "issues": [issue_view(issue) for issue in issues],
         "knowledge": knowledge,
         "previous_validation_feedback": feedback or [],
         "segments": [

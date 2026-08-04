@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from wenyi_direct.config import Config, WindowConfig
 from wenyi_direct.ingest.models import Chapter, Segment
 from wenyi_direct.pipeline.repair import RepairPlanner
@@ -52,12 +54,42 @@ def test_long_chapter_has_source_on_both_sides() -> None:
     assert max(middle.read_indexes) > 3
 
 
-def test_repair_planner_expands_causal_range_and_merges_neighbors() -> None:
+def test_repair_planner_keeps_write_scope_precise_and_expands_read_context() -> None:
     issues = [
         {"start": 10, "end": 10, "cause_start": 8, "cause_end": 10},
         {"start": 11, "end": 11, "cause_start": 11, "cause_end": 11},
     ]
     regions = RepairPlanner(context_segments=1).plan(issues, segment_count=20)
     assert len(regions) == 1
-    assert (regions[0].start, regions[0].end) == (7, 12)
+    assert (regions[0].start, regions[0].end) == (8, 11)
+    assert RepairPlanner(context_segments=1).read_bounds(regions[0], 20) == (7, 12)
     assert len(regions[0].issues) == 2
+
+
+def test_yesterday_failure_read_halo_never_becomes_write_scope() -> None:
+    issues = [
+        {"start": 49, "end": 51, "cause_start": 49, "cause_end": 51},
+    ]
+    planner = RepairPlanner(context_segments=2)
+    region = planner.plan(issues, segment_count=89)[0]
+
+    assert region.indexes == (49, 50, 51)
+    assert planner.read_bounds(region, 89) == (47, 53)
+
+
+def test_window_planner_can_budget_reader_visible_target_lengths() -> None:
+    chapter = _chapter(["a", "b", "c"])
+    planner = WindowPlanner(
+        WindowConfig(max_read_chars=12, max_write_chars=6, source_halo_chars=6)
+    )
+    windows = planner.plan(chapter, {0: 6, 1: 6, 2: 6})
+    assert [window.write_indexes for window in windows] == [(0,), (1,), (2,)]
+
+
+def test_config_rejects_prompt_language_mismatch_and_invalid_window_budget() -> None:
+    with pytest.raises(ValueError, match="Simplified Chinese only"):
+        Config.model_validate(
+            {"target_lang": "en", "providers": {"default": {"provider": "fake"}}}
+        )
+    with pytest.raises(ValueError, match="cannot exceed"):
+        WindowConfig(max_read_chars=10, max_write_chars=11)

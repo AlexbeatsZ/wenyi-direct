@@ -15,6 +15,12 @@ from ..ingest.segmenter import load_document
 from ..llm.base import LLMClient
 from ..llm.json_parser import JSONParseError
 from ..prompts import (
+    CHINESE_FINDING_VALIDATION_SYSTEM,
+    CHINESE_READER_SYSTEM,
+    FACTUAL_AUDIT_SYSTEM,
+    FIDELITY_SYSTEM,
+    REPAIR_SYSTEM,
+    TRANSLATION_SYSTEM,
     chinese_finding_validation_messages,
     chinese_reader_messages,
     factual_audit_messages,
@@ -67,7 +73,25 @@ class DirectPipeline:
         terms_path = Path(config.terminology_file or "terminology.yaml")
         if not terms_path.is_absolute():
             terms_path = self.config_dir / terms_path
-        self.terminology = TerminologyStore.load(terms_path)
+        self._base_terminology = TerminologyStore.load(terms_path)
+        self.terminology = self._base_terminology
+        self._run_terminologies: dict[str, TerminologyStore] = {}
+
+    def _activate_terminology_for(self, store: RunStore) -> None:
+        """Keep model discoveries inside one book's state, never in shared config."""
+        key = str(Path(store.run_dir).resolve())
+        terminology = self._run_terminologies.get(key)
+        if terminology is None:
+            path = Path(store.run_dir) / "terminology.yaml"
+            if path.exists():
+                terminology = TerminologyStore.load(path)
+            else:
+                terminology = TerminologyStore(
+                    path, self._base_terminology.document.model_copy(deep=True)
+                )
+                terminology.save()
+            self._run_terminologies[key] = terminology
+        self.terminology = terminology
 
     def store_for(self, source_path: str | Path) -> RunStore:
         state_root = Path(self.config.state_dir)
@@ -91,6 +115,7 @@ class DirectPipeline:
                     "source file changed after state creation; create a new state or "
                     "explicitly migrate the source instead of resuming stale segments"
                 )
+            self._activate_terminology_for(store)
             return store
         document = load_document(
             source,
@@ -104,6 +129,7 @@ class DirectPipeline:
         manifest["future_chapters_required"] = False
         manifest["source_sha256"] = source_sha256
         store.save_manifest(manifest)
+        self._activate_terminology_for(store)
         store.log_event("prepared", chapters=len(document.chapters), source_path=source)
         return store
 
@@ -135,6 +161,31 @@ class DirectPipeline:
             raise RuntimeError(
                 f"chapter {chapter_index} source changed after shadow creation"
             )
+        current_policy = self._policy_fingerprint()
+        if shadow and shadow.get("policy_fingerprint") not in {None, current_policy}:
+            expected = {
+                segment_id(chapter.index, segment) for segment in chapter.text_segments
+            }
+            completed = set(shadow.get("translated_ids", []))
+            if completed != expected:
+                phase = "translate"
+            elif self.config.pipeline.factual_audit:
+                phase = "factual_audit"
+            elif self.config.pipeline.chinese_reader_audit:
+                phase = "chinese_audit"
+            else:
+                phase = "promote"
+            previous_policy = shadow.get("policy_fingerprint")
+            shadow["phase"] = phase
+            shadow.pop("chinese_state", None)
+            self._save_shadow(store, chapter.index, shadow)
+            store.log_event(
+                "shadow_policy_invalidated",
+                chapter=chapter.index,
+                previous_policy=previous_policy,
+                current_policy=current_policy,
+                restart_phase=phase,
+            )
         if not shadow:
             shadow = {
                 "schema": 1,
@@ -146,7 +197,11 @@ class DirectPipeline:
                 },
                 "translated_ids": [],
             }
-            store.save_shadow(chapter_index, shadow)
+            self._save_shadow(store, chapter_index, shadow)
+        elif shadow.get("policy_fingerprint") is None:
+            # Legacy shadows can resume without discarding paid model work. All current
+            # promotion gates still run, and subsequent policy changes are fingerprinted.
+            self._save_shadow(store, chapter_index, shadow)
         self._clean_shadow_control_metadata(store, chapter, shadow)
         store.set_chapter_fields(chapter_index, phase=shadow["phase"], error=None)
         try:
@@ -178,6 +233,28 @@ class DirectPipeline:
     def _save_targets(shadow: dict[str, Any], targets: dict[int, str]) -> None:
         shadow["targets"] = {str(index): target for index, target in targets.items()}
 
+    def _policy_fingerprint(self) -> str:
+        payload = {
+            "config": self.config.model_dump(mode="json"),
+            "terminology": self.terminology.document.model_dump(mode="json"),
+            "prompts": [
+                TRANSLATION_SYSTEM,
+                FACTUAL_AUDIT_SYSTEM,
+                CHINESE_READER_SYSTEM,
+                CHINESE_FINDING_VALIDATION_SYSTEM,
+                REPAIR_SYSTEM,
+                FIDELITY_SYSTEM,
+            ],
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _save_shadow(
+        self, store: RunStore, chapter_index: int, shadow: dict[str, Any]
+    ) -> None:
+        shadow["policy_fingerprint"] = self._policy_fingerprint()
+        store.save_shadow(chapter_index, shadow)
+
     def _clean_shadow_control_metadata(
         self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
     ) -> None:
@@ -198,7 +275,7 @@ class DirectPipeline:
         )
         targets.update(cleaned)
         self._save_targets(shadow, targets)
-        store.save_shadow(chapter.index, shadow)
+        self._save_shadow(store, chapter.index, shadow)
         store.log_event(
             "control_metadata_cleanup", chapter=chapter.index, count=len(cleaned)
         )
@@ -224,7 +301,7 @@ class DirectPipeline:
                 segment_id(chapter.index, chapter.segments[index]) for index in translated
             )
             shadow["translated_ids"] = sorted(completed)
-            store.save_shadow(chapter.index, shadow)
+            self._save_shadow(store, chapter.index, shadow)
         expected = {
             segment_id(chapter.index, segment) for segment in chapter.text_segments
         }
@@ -237,7 +314,7 @@ class DirectPipeline:
         )
         if not self.config.pipeline.factual_audit and not self.config.pipeline.chinese_reader_audit:
             shadow["phase"] = "promote"
-        store.save_shadow(chapter.index, shadow)
+        self._save_shadow(store, chapter.index, shadow)
         store.set_chapter_fields(chapter.index, phase=shadow["phase"])
 
     def _translate_window(
@@ -287,7 +364,11 @@ class DirectPipeline:
     ) -> None:
         targets = self._targets(shadow)
         issues: list[dict] = []
-        for window in self.window_planner.plan(chapter):
+        audit_lengths = {
+            segment.index: len(segment.source) + len(targets.get(segment.index, ""))
+            for segment in chapter.text_segments
+        }
+        for window in self.window_planner.plan(chapter, audit_lengths):
             source = "\n".join(chapter.segments[index].source for index in window.read_indexes)
             messages = factual_audit_messages(
                 chapter,
@@ -304,7 +385,12 @@ class DirectPipeline:
                 tier=self.config.pipeline.audit_tier,
                 stage="factual_audit",
             )
-            parsed = self._parse_issues(chapter, response, set(window.write_indexes))
+            parsed = self._parse_issues(
+                chapter,
+                response,
+                set(window.write_indexes),
+                set(window.read_indexes),
+            )
             issues.extend(parsed)
             discoveries = (
                 list(response.get("term_candidates", []))
@@ -339,11 +425,11 @@ class DirectPipeline:
                 store, chapter, targets, region, "factual_repair"
             )
             self._save_targets(shadow, targets)
-            store.save_shadow(chapter.index, shadow)
+            self._save_shadow(store, chapter.index, shadow)
         shadow["phase"] = (
             "chinese_audit" if self.config.pipeline.chinese_reader_audit else "promote"
         )
-        store.save_shadow(chapter.index, shadow)
+        self._save_shadow(store, chapter.index, shadow)
         store.set_chapter_fields(chapter.index, phase=shadow["phase"])
 
     def _chinese_stage(
@@ -354,7 +440,11 @@ class DirectPipeline:
         stored_reader = state.get("reader_batches")
         if not isinstance(stored_reader, list):
             stored_reader = []
-            for window in self.window_planner.plan(chapter):
+            reader_lengths = {
+                segment.index: len(targets.get(segment.index, ""))
+                for segment in chapter.text_segments
+            }
+            for window in self.window_planner.plan(chapter, reader_lengths):
                 messages = chinese_reader_messages(
                     chapter, targets, window.read_indexes, window.write_indexes
                 )
@@ -367,7 +457,10 @@ class DirectPipeline:
                     stage="chinese_reader_audit",
                 )
                 parsed = self._parse_issues(
-                    chapter, response, set(window.write_indexes)
+                    chapter,
+                    response,
+                    set(window.write_indexes),
+                    set(window.read_indexes),
                 )
                 stored_reader.append(
                     {
@@ -382,7 +475,7 @@ class DirectPipeline:
                     {"input_ref": input_ref, "issues": parsed},
                 )
                 state["reader_batches"] = stored_reader
-                store.save_shadow(chapter.index, shadow)
+                self._save_shadow(store, chapter.index, shadow)
         reader_batches = [
             (
                 TranslationWindow(
@@ -406,8 +499,15 @@ class DirectPipeline:
             if key in stored_validations:
                 results = list(stored_validations[key])
             else:
+                validation_source = "\n".join(
+                    chapter.segments[index].source for index in window.read_indexes
+                )
                 messages = chinese_finding_validation_messages(
-                    chapter, targets, tagged, window.read_indexes
+                    chapter,
+                    targets,
+                    tagged,
+                    window.read_indexes,
+                    self._knowledge_for(store, chapter, validation_source),
                 )
                 input_ref = store.save_translation_input(
                     {"stage": "chinese_finding_validation", "messages": messages}
@@ -417,7 +517,9 @@ class DirectPipeline:
                     tier=self.config.pipeline.validation_tier,
                     stage="chinese_finding_validation",
                 )
-                results = self._parse_reader_validations(chapter, response, tagged)
+                results = self._parse_reader_validations(
+                    chapter, response, tagged, set(window.read_indexes)
+                )
                 for issue, result in zip(tagged, results, strict=True):
                     store.record_audit(
                         chapter.index,
@@ -429,7 +531,7 @@ class DirectPipeline:
                         },
                     )
                 stored_validations[key] = results
-                store.save_shadow(chapter.index, shadow)
+                self._save_shadow(store, chapter.index, shadow)
             batch_accepted: list[dict] = []
             for result in results:
                 if result["safe_to_repair"]:
@@ -443,8 +545,20 @@ class DirectPipeline:
                 continue
             regions = self.repair_planner.plan(batch, len(chapter.segments))
             write_indexes = tuple(
-                sorted({index for region in regions for index in region.indexes})
+                sorted(
+                    {
+                        index
+                        for region in regions
+                        for index in region.indexes
+                        if chapter.segments[index].source.strip()
+                    }
+                )
             )
+            if not write_indexes:
+                completed_repairs.add(batch_index)
+                state["completed_repair_batches"] = sorted(completed_repairs)
+                self._save_shadow(store, chapter.index, shadow)
+                continue
             combined = RepairRegion(
                 write_indexes[0],
                 write_indexes[-1],
@@ -456,15 +570,17 @@ class DirectPipeline:
                 targets,
                 combined,
                 "language_repair",
-                read_indexes=window.read_indexes,
+                read_indexes=self._read_scope_for_range(
+                    chapter, write_indexes[0], write_indexes[-1], targets
+                ),
                 write_indexes=write_indexes,
             )
             self._save_targets(shadow, targets)
             completed_repairs.add(batch_index)
             state["completed_repair_batches"] = sorted(completed_repairs)
-            store.save_shadow(chapter.index, shadow)
+            self._save_shadow(store, chapter.index, shadow)
         shadow["phase"] = "promote"
-        store.save_shadow(chapter.index, shadow)
+        self._save_shadow(store, chapter.index, shadow)
         store.set_chapter_fields(chapter.index, phase="promote")
 
     def _repair_and_validate(
@@ -484,8 +600,10 @@ class DirectPipeline:
         if not write_indexes:
             return targets
         read_indexes = read_indexes or self._read_scope_for_range(
-            chapter, write_indexes[0], write_indexes[-1]
+            chapter, write_indexes[0], write_indexes[-1], targets
         )
+        if not set(write_indexes).issubset(read_indexes):
+            raise AlignmentError("repair write scope must be contained in visible read scope")
         feedback: list[dict] = []
         for attempt in range(1, self.config.pipeline.max_repair_attempts + 1):
             source = "\n".join(
@@ -596,9 +714,22 @@ class DirectPipeline:
             tuple(segment.index for segment in chapter.text_segments),
         )
         if term_issues:
-            raise RuntimeError(
-                f"cannot promote chapter with hard terminology violations: {term_issues}"
+            for region in self.repair_planner.plan(term_issues, len(chapter.segments)):
+                targets = self._repair_and_validate(
+                    store, chapter, targets, region, "terminology_repair"
+                )
+                self._save_targets(shadow, targets)
+                self._save_shadow(store, chapter.index, shadow)
+            remaining = self._terminology_issues(
+                chapter,
+                targets,
+                tuple(segment.index for segment in chapter.text_segments),
             )
+            if remaining:
+                raise RuntimeError(
+                    "cannot promote chapter with hard terminology violations after repair: "
+                    f"{remaining}"
+                )
         previous = {segment.index: segment.target or "" for segment in chapter.segments}
         for segment in chapter.segments:
             if segment.source.strip():
@@ -612,7 +743,7 @@ class DirectPipeline:
         )
         store.save_chapter(chapter)
         shadow["phase"] = "done"
-        store.save_shadow(chapter.index, shadow)
+        self._save_shadow(store, chapter.index, shadow)
         store.set_chapter_fields(
             chapter.index,
             status=STATUS_DONE,
@@ -647,7 +778,11 @@ class DirectPipeline:
         return result
 
     def _parse_issues(
-        self, chapter: Chapter, response: Any, allowed_starts: set[int]
+        self,
+        chapter: Chapter,
+        response: Any,
+        audited_indexes: set[int],
+        visible_read_indexes: set[int],
     ) -> list[dict]:
         if not isinstance(response, dict) or not isinstance(response.get("issues"), list):
             raise AlignmentError("audit response must be an object with an issues array")
@@ -673,7 +808,19 @@ class DirectPipeline:
                 )
             except (KeyError, TypeError):
                 raise AlignmentError(f"audit issue contains an unknown stable ID: {raw}")
-            if not set(range(min(start, end), max(start, end) + 1)) & allowed_starts:
+            symptom_indexes = {
+                segment.index
+                for segment in chapter.text_segments
+                if min(start, end) <= segment.index <= max(start, end)
+            }
+            cause_indexes = {
+                segment.index
+                for segment in chapter.text_segments
+                if min(cause_start, cause_end) <= segment.index <= max(cause_start, cause_end)
+            }
+            if not (symptom_indexes | cause_indexes).issubset(visible_read_indexes):
+                raise AlignmentError("audit issue escaped outside the visible read scope")
+            if not symptom_indexes & audited_indexes:
                 continue
             parsed.append(
                 {
@@ -704,7 +851,11 @@ class DirectPipeline:
         raise KeyError(stable_id)
 
     def _parse_reader_validations(
-        self, chapter: Chapter, response: Any, original_issues: list[dict]
+        self,
+        chapter: Chapter,
+        response: Any,
+        original_issues: list[dict],
+        visible_read_indexes: set[int],
     ) -> list[dict]:
         if not isinstance(response, dict) or not isinstance(response.get("results"), list):
             raise AlignmentError("reader validation response is malformed")
@@ -719,14 +870,18 @@ class DirectPipeline:
                     f"reader validation returned unknown or duplicate finding_id {finding_id!r}"
                 )
             received[finding_id] = self._parse_reader_validation(
-                chapter, result, expected[finding_id]
+                chapter, result, expected[finding_id], visible_read_indexes
             )
         if set(received) != set(expected):
             raise AlignmentError("reader validation omitted one or more finding IDs")
         return [received[str(issue["finding_id"])] for issue in original_issues]
 
     def _parse_reader_validation(
-        self, chapter: Chapter, response: Any, original_issue: dict
+        self,
+        chapter: Chapter,
+        response: Any,
+        original_issue: dict,
+        visible_read_indexes: set[int],
     ) -> dict:
         if not isinstance(response.get("safe_to_repair"), bool):
             raise AlignmentError("reader validation response is malformed")
@@ -743,6 +898,13 @@ class DirectPipeline:
             end = self._resolve_audit_id(chapter, id_map, response["repair_end_id"])
         except (KeyError, TypeError):
             raise AlignmentError("reader validation returned an unknown repair range")
+        repair_indexes = {
+            segment.index
+            for segment in chapter.text_segments
+            if min(start, end) <= segment.index <= max(start, end)
+        }
+        if not repair_indexes.issubset(visible_read_indexes):
+            raise AlignmentError("reader validation escaped outside the visible read scope")
         result.update(
             {
                 "start": min(start, end),
@@ -754,28 +916,37 @@ class DirectPipeline:
         return result
 
     def _read_scope_for_range(
-        self, chapter: Chapter, start: int, end: int
+        self,
+        chapter: Chapter,
+        start: int,
+        end: int,
+        targets: dict[int, str] | None = None,
     ) -> tuple[int, ...]:
         indexes = [segment.index for segment in chapter.text_segments]
-        total = sum(len(chapter.segments[index].source) for index in indexes)
+        lengths = {
+            index: len(chapter.segments[index].source)
+            + len((targets or {}).get(index, ""))
+            for index in indexes
+        }
+        total = sum(lengths.values())
         if total <= self.config.window.max_read_chars:
             return tuple(indexes)
         positions = {index: position for position, index in enumerate(indexes)}
         left = positions[start]
         right = positions[end]
-        chars = sum(len(chapter.segments[index].source) for index in indexes[left : right + 1])
+        chars = sum(lengths[index] for index in indexes[left : right + 1])
         before = after = 0
         while True:
             changed = False
             if left > 0:
-                length = len(chapter.segments[indexes[left - 1]].source)
+                length = lengths[indexes[left - 1]]
                 if before + length <= self.config.window.source_halo_chars and chars + length <= self.config.window.max_read_chars:
                     left -= 1
                     before += length
                     chars += length
                     changed = True
             if right + 1 < len(indexes):
-                length = len(chapter.segments[indexes[right + 1]].source)
+                length = lengths[indexes[right + 1]]
                 if after + length <= self.config.window.source_halo_chars and chars + length <= self.config.window.max_read_chars:
                     right += 1
                     after += length
@@ -889,6 +1060,7 @@ class DirectPipeline:
 
 
 def export_json(store: RunStore, output_path: str | Path) -> str:
+    store.require_formal_complete()
     manifest = store.load_manifest()
     chapters = []
     for item in manifest["chapters"]:

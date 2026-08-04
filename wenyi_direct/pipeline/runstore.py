@@ -117,6 +117,30 @@ class RunStore:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             return False
 
+    def require_formal_complete(self) -> None:
+        """Reject every export path unless all formal chapters are truly complete."""
+        manifest = self.load_manifest()
+        incomplete = [
+            item["index"]
+            for item in manifest["chapters"]
+            if item.get("status") != STATUS_DONE
+        ]
+        empty: list[tuple[int, int]] = []
+        for item in manifest["chapters"]:
+            if item.get("status") != STATUS_DONE:
+                continue
+            chapter = self.load_chapter(item["index"])
+            empty.extend(
+                (chapter.index, segment.index)
+                for segment in chapter.text_segments
+                if not (segment.target or "").strip()
+            )
+        if incomplete or empty:
+            raise RuntimeError(
+                "formal translation is incomplete: "
+                f"chapters={incomplete}, empty_targets={empty}"
+            )
+
     # ── 路径 ──────────────────────────────────────────────────────────────
     @property
     def manifest_path(self) -> str:

@@ -10,7 +10,8 @@ Its quality path is:
 1. A strong model directly translates a full chapter whenever the configured
    context/output budget permits. Long chapters use a bidirectional source halo.
 2. A source-aware factual audit reports concrete meaning problems; related findings
-   are repaired together over an expanded region and verified against the source.
+   are repaired over their explicit causal region and verified against the source.
+   Neighboring context remains read-only.
 3. A Chinese Reader Audit sees only reader-visible Chinese. Its findings are then
    checked against neighboring source before any repair, followed by source-fidelity
    validation of changed regions.
@@ -27,12 +28,13 @@ translation without another model call. Non-conflicting discoveries become soft
 active preferences, conflicts remain inactive candidates, and rejected mappings stay
 out. Pronoun guidance remains local to a retrieved term; the pipeline does not infer
 or persist an active speaker/referent across later windows. Hard rules are checked
-mechanically during repair and before final promotion.
+mechanically during repair and before final promotion. Model discoveries live in the
+current book's state rather than the shared terminology seed file.
 
 ## Supported model transports
 
 - `codex-cli`: isolated `codex exec --ephemeral --ignore-user-config --ignore-rules`
-- `agy`: fresh non-interactive `agy --print` calls
+- `agy`: sandboxed temporary-TXT requests with a short `agy --print` instruction
 - `openai-compatible`: `/chat/completions` services
 - `anthropic-compatible`: Anthropic Messages-compatible `/v1/messages` services
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -49,7 +50,15 @@ def test_agy_uses_fresh_print_plan_request(tmp_path, monkeypatch) -> None:
     captured = {}
 
     def fake_run(args, **kwargs):
-        captured.update({"args": args, **kwargs})
+        request_path = Path(kwargs["cwd"]) / "request.txt"
+        captured.update(
+            {
+                "args": args,
+                "request_path": request_path,
+                "request_text": request_path.read_text(encoding="utf-8"),
+                **kwargs,
+            }
+        )
         return subprocess.CompletedProcess(args, 0, stdout='{"ok":true}', stderr="")
 
     monkeypatch.setattr("wenyi_direct.llm.providers.agy.subprocess.run", fake_run)
@@ -64,10 +73,41 @@ def test_agy_uses_fresh_print_plan_request(tmp_path, monkeypatch) -> None:
     args = captured["args"]
     assert args[:2] == ["agy", "--model"]
     assert args[args.index("--mode") + 1] == "plan"
+    assert "--sandbox" in args
+    assert "--dangerously-skip-permissions" in args
+    assert "--disable-slash-commands" in args
+    assert "--new-project" in args
     assert "--print" in args
     assert "--print-timeout" in args
-    assert "hello" in args[-1]
-    assert args[-1].endswith("explanatory text.")
+    assert "hello" not in args[-1]
+    assert "request.txt" in args[-1]
+    assert "hello" in captured["request_text"]
+    assert captured["request_text"].endswith("explanatory text.")
+    assert not captured["request_path"].exists()
+
+
+def test_agy_large_prompt_never_enters_windows_argv(tmp_path, monkeypatch) -> None:
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["request_length"] = len(
+            (Path(kwargs["cwd"]) / "request.txt").read_text(encoding="utf-8")
+        )
+        return subprocess.CompletedProcess(args, 0, stdout='{"ok":true}', stderr="")
+
+    monkeypatch.setattr("wenyi_direct.llm.providers.agy.subprocess.run", fake_run)
+    client = AgyClient(
+        LLMConfig(
+            provider="agy",
+            cwd=str(tmp_path),
+            tiers={"strong": TierConfig(model="gemini-3.6-flash-high")},
+        )
+    )
+    client.complete([{"role": "user", "content": "x" * 70_000}], json_mode=True)
+
+    assert captured["request_length"] > 70_000
+    assert max(map(len, captured["args"])) < 1_000
 
 
 def test_anthropic_messages_wire_format(monkeypatch) -> None:

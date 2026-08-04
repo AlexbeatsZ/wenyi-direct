@@ -307,12 +307,23 @@ class TerminologyStore:
                 and term.applies_to_chapter(chapter)
                 for term in terms
             )
+            future_conflicts = [
+                term.valid_from
+                for term in terms
+                if term.source == source
+                and term.target != target
+                and term.status == "active"
+                and term.valid_from is not None
+                and term.valid_from > chapter
+            ]
+            valid_to = min(future_conflicts) - 1 if future_conflicts else None
             rule = TermRule(
                 source=source,
                 target=target,
                 mode="preferred",
                 status="candidate" if has_conflict else "active",
                 valid_from=chapter,
+                valid_to=valid_to,
             )
             terms.append(rule)
             added.append(rule)

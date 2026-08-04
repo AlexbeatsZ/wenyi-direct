@@ -11,11 +11,16 @@ class WindowPlanner:
     def __init__(self, config: WindowConfig) -> None:
         self.config = config
 
-    def plan(self, chapter: Chapter) -> list[TranslationWindow]:
+    def plan(
+        self, chapter: Chapter, char_lengths: dict[int, int] | None = None
+    ) -> list[TranslationWindow]:
         indexes = [segment.index for segment in chapter.text_segments]
         if not indexes:
             return []
-        lengths = {segment.index: len(segment.source) for segment in chapter.text_segments}
+        lengths = {
+            segment.index: max(1, int((char_lengths or {}).get(segment.index, len(segment.source))))
+            for segment in chapter.text_segments
+        }
         total = sum(lengths.values())
         write_groups: list[list[int]] = []
         current: list[int] = []
