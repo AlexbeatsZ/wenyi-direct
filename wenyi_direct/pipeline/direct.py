@@ -363,7 +363,12 @@ class DirectPipeline:
         store.set_chapter_fields(chapter.index, phase=shadow["phase"])
 
     def _translate_window(
-        self, store: RunStore, chapter: Chapter, window: TranslationWindow
+        self,
+        store: RunStore,
+        chapter: Chapter,
+        window: TranslationWindow,
+        *,
+        depth: int = 0,
     ) -> dict[int, str]:
         read_source = "\n".join(chapter.segments[index].source for index in window.read_indexes)
         messages = translation_messages(
@@ -382,12 +387,30 @@ class DirectPipeline:
                 stage="direct_translation",
             )
             translated = self._parse_translations(chapter, window.write_indexes, response)
-        except (AlignmentError, JSONParseError):
+        except (AlignmentError, JSONParseError) as error:
             if len(window.write_indexes) < 2:
                 raise
+            children = split_write_scope(window)
+            store.log_event(
+                "translation_window_split",
+                chapter=chapter.index,
+                read_indexes=list(window.read_indexes),
+                write_indexes=list(window.write_indexes),
+                child_write_indexes=[list(child.write_indexes) for child in children],
+                depth=depth,
+                reason_type=type(error).__name__,
+                reason=str(error),
+            )
             result: dict[int, str] = {}
-            for smaller in split_write_scope(window):
-                result.update(self._translate_window(store, chapter, smaller))
+            for smaller in children:
+                result.update(
+                    self._translate_window(
+                        store,
+                        chapter,
+                        smaller,
+                        depth=depth + 1,
+                    )
+                )
             return result
         self._archive_targets(
             store,
@@ -401,6 +424,7 @@ class DirectPipeline:
             chapter=chapter.index,
             read_indexes=list(window.read_indexes),
             write_indexes=list(window.write_indexes),
+            split_depth=depth,
         )
         return translated
 
@@ -408,12 +432,35 @@ class DirectPipeline:
         self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
     ) -> None:
         targets = self._targets(shadow)
+        state = shadow.setdefault("factual_state", {})
+        plan = state.get("plan")
+        if not isinstance(plan, list):
+            audit_lengths = {
+                segment.index: len(segment.source) + len(targets.get(segment.index, ""))
+                for segment in chapter.text_segments
+            }
+            plan = [
+                {
+                    "read_indexes": list(window.read_indexes),
+                    "write_indexes": list(window.write_indexes),
+                }
+                for window in self.window_planner.plan(chapter, audit_lengths)
+            ]
+            state["plan"] = plan
+            state["audit_batches"] = {}
+            state["completed_repair_regions"] = []
+            self._save_shadow(store, chapter.index, shadow)
+        audit_batches = state.setdefault("audit_batches", {})
         issues: list[dict] = []
-        audit_lengths = {
-            segment.index: len(segment.source) + len(targets.get(segment.index, ""))
-            for segment in chapter.text_segments
-        }
-        for window in self.window_planner.plan(chapter, audit_lengths):
+        for batch_index, item in enumerate(plan):
+            key = str(batch_index)
+            if key in audit_batches:
+                batch = audit_batches[key]
+                issues.extend(list(batch.get("issues", [])))
+                continue
+            window = TranslationWindow(
+                tuple(item["read_indexes"]), tuple(item["write_indexes"])
+            )
             source = "\n".join(chapter.segments[index].source for index in window.read_indexes)
             messages = factual_audit_messages(
                 chapter,
@@ -449,15 +496,24 @@ class DirectPipeline:
                 source,
                 "\n".join(targets[index] for index in window.read_indexes),
             )
+            batch = {
+                "read_indexes": list(window.read_indexes),
+                "write_indexes": list(window.write_indexes),
+                "issues": parsed,
+                "term_candidates": discoveries,
+                "added_terms": [term.model_dump(exclude_none=True) for term in added_terms],
+            }
+            audit_batches[key] = batch
             store.record_audit(
                 chapter.index,
                 "factual_audit",
                 {
                     "input_ref": input_ref,
                     "issues": parsed,
-                    "added_terms": [term.model_dump(exclude_none=True) for term in added_terms],
+                    "added_terms": batch["added_terms"],
                 },
             )
+            self._save_shadow(store, chapter.index, shadow)
         issues.extend(
             self._terminology_issues(
                 chapter,
@@ -465,11 +521,37 @@ class DirectPipeline:
                 tuple(segment.index for segment in chapter.text_segments),
             )
         )
-        for region in self.repair_planner.plan(issues, len(chapter.segments)):
+        stored_regions = state.get("repair_regions")
+        if not isinstance(stored_regions, list):
+            stored_regions = [
+                {
+                    "id": f"factual-r{index}",
+                    "start": region.start,
+                    "end": region.end,
+                    "issues": list(region.issues),
+                }
+                for index, region in enumerate(
+                    self.repair_planner.plan(issues, len(chapter.segments))
+                )
+            ]
+            state["repair_regions"] = stored_regions
+            self._save_shadow(store, chapter.index, shadow)
+        completed = set(state.setdefault("completed_repair_regions", []))
+        for item in stored_regions:
+            region_id = str(item["id"])
+            if region_id in completed:
+                continue
+            region = RepairRegion(
+                int(item["start"]),
+                int(item["end"]),
+                tuple(item.get("issues", [])),
+            )
             targets = self._repair_and_validate(
                 store, chapter, targets, region, "factual_repair"
             )
             self._save_targets(shadow, targets)
+            completed.add(region_id)
+            state["completed_repair_regions"] = sorted(completed)
             self._save_shadow(store, chapter.index, shadow)
         snapshots = shadow.setdefault("stage_snapshots", {})
         snapshots["factual"] = dict(shadow["targets"])
@@ -535,12 +617,12 @@ class DirectPipeline:
         ]
 
         stored_validations = state.setdefault("validation_batches", {})
-        accepted_batches: list[tuple[int, TranslationWindow, list[dict]]] = []
+        accepted_findings: list[dict] = []
         for batch_index, (window, batch) in enumerate(reader_batches):
             if not batch:
                 continue
             tagged = [
-                {**issue, "finding_id": f"f{index}"}
+                {**issue, "finding_id": f"b{batch_index}-f{index}"}
                 for index, issue in enumerate(batch)
             ]
             key = str(batch_index)
@@ -580,52 +662,62 @@ class DirectPipeline:
                     )
                 stored_validations[key] = results
                 self._save_shadow(store, chapter.index, shadow)
-            batch_accepted: list[dict] = []
-            for result in results:
-                if result["safe_to_repair"]:
-                    batch_accepted.append(result)
-            if batch_accepted:
-                accepted_batches.append((batch_index, window, batch_accepted))
+            accepted_findings.extend(
+                result for result in results if result.get("safe_to_repair") is True
+            )
 
-        completed_repairs = set(state.setdefault("completed_repair_batches", []))
-        for batch_index, window, batch in accepted_batches:
-            if batch_index in completed_repairs:
-                continue
-            regions = self.repair_planner.plan(batch, len(chapter.segments))
-            write_indexes = tuple(
-                sorted(
-                    {
-                        index
-                        for region in regions
-                        for index in region.indexes
-                        if chapter.segments[index].source.strip()
-                    }
+        stored_regions = state.get("repair_regions")
+        if not isinstance(stored_regions, list):
+            legacy_completed = state.get("completed_repair_batches")
+            if legacy_completed:
+                raise RuntimeError(
+                    "legacy Chinese repair checkpoints cannot be safely merged; "
+                    "rerun with --restart-from chinese-audit"
                 )
-            )
-            if not write_indexes:
-                completed_repairs.add(batch_index)
-                state["completed_repair_batches"] = sorted(completed_repairs)
-                self._save_shadow(store, chapter.index, shadow)
+            stored_regions = [
+                {
+                    "id": f"language-r{index}",
+                    "start": region.start,
+                    "end": region.end,
+                    "issues": list(region.issues),
+                }
+                for index, region in enumerate(
+                    self.repair_planner.plan(accepted_findings, len(chapter.segments))
+                )
+            ]
+            state["repair_regions"] = stored_regions
+            state["completed_repair_regions"] = []
+            self._save_shadow(store, chapter.index, shadow)
+        completed = set(state.setdefault("completed_repair_regions", []))
+        for item in stored_regions:
+            region_id = str(item["id"])
+            if region_id in completed:
                 continue
-            combined = RepairRegion(
-                write_indexes[0],
-                write_indexes[-1],
-                tuple(issue for region in regions for issue in region.issues),
+            region = RepairRegion(
+                int(item["start"]),
+                int(item["end"]),
+                tuple(item.get("issues", [])),
             )
-            targets = self._repair_and_validate(
-                store,
-                chapter,
-                targets,
-                combined,
-                "language_repair",
-                read_indexes=self._read_scope_for_range(
-                    chapter, write_indexes[0], write_indexes[-1], targets
-                ),
-                write_indexes=write_indexes,
+            write_indexes = tuple(
+                index
+                for index in region.indexes
+                if chapter.segments[index].source.strip()
             )
-            self._save_targets(shadow, targets)
-            completed_repairs.add(batch_index)
-            state["completed_repair_batches"] = sorted(completed_repairs)
+            if write_indexes:
+                targets = self._repair_and_validate(
+                    store,
+                    chapter,
+                    targets,
+                    region,
+                    "language_repair",
+                    read_indexes=self._read_scope_for_range(
+                        chapter, write_indexes[0], write_indexes[-1], targets
+                    ),
+                    write_indexes=write_indexes,
+                )
+                self._save_targets(shadow, targets)
+            completed.add(region_id)
+            state["completed_repair_regions"] = sorted(completed)
             self._save_shadow(store, chapter.index, shadow)
         shadow["phase"] = "promote"
         self._save_shadow(store, chapter.index, shadow)
