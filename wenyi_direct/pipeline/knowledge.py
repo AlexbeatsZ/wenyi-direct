@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any, Literal
@@ -13,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 TermMode = Literal["hard", "preferred"]
 TermStatus = Literal["active", "candidate", "rejected"]
 Pronoun = Literal["他", "她", "它", "neutral"]
+TermOrigin = Literal["discovered"]
 
 
 class TranslationGroup(BaseModel):
@@ -41,6 +44,9 @@ class TermRule(BaseModel):
     valid_from: int | None = Field(default=None, ge=0)
     valid_to: int | None = Field(default=None, ge=0)
     pronoun: Pronoun | None = None
+    origin: TermOrigin | None = None
+    evidence_chapter: int | None = Field(default=None, ge=0)
+    evidence_segment: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_rule(self) -> "TermRule":
@@ -54,6 +60,8 @@ class TermRule(BaseModel):
             and self.valid_from > self.valid_to
         ):
             raise ValueError("term valid_from cannot be greater than valid_to")
+        if self.origin == "discovered" and self.evidence_chapter is None:
+            raise ValueError("discovered terms require evidence_chapter")
         return self
 
     def applies_to_chapter(self, chapter: int) -> bool:
@@ -137,6 +145,7 @@ class TerminologyStore:
     def __init__(self, path: str | Path, document: TerminologyDocument | None = None) -> None:
         self.path = Path(path)
         self.document = document or TerminologyDocument()
+        self._promotion_in_progress = False
 
     @classmethod
     def load(cls, path: str | Path) -> "TerminologyStore":
@@ -152,6 +161,7 @@ class TerminologyStore:
 
     @property
     def terms(self) -> list[TermRule]:
+        self._promote_confirmed_discoveries()
         return self.document.terms
 
     def save(self) -> None:
@@ -166,6 +176,77 @@ class TerminologyStore:
             encoding="utf-8",
         )
         os.replace(temporary, self.path)
+
+    def _formal_evidence_matches(self, term: TermRule) -> bool:
+        if term.evidence_chapter is None:
+            return False
+        run_dir = self.path.parent
+        manifest_path = run_dir / "manifest.json"
+        chapter_path = run_dir / "chapters" / f"ch{term.evidence_chapter}.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            chapter = json.loads(chapter_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return False
+        status = {
+            int(item["index"]): item.get("status")
+            for item in manifest.get("chapters", [])
+            if isinstance(item, dict) and "index" in item
+        }
+        if status.get(term.evidence_chapter) != "done":
+            return False
+        segments = [item for item in chapter.get("segments", []) if isinstance(item, dict)]
+        if term.evidence_segment is not None:
+            segments = [
+                item
+                for item in segments
+                if int(item.get("index", -1)) == term.evidence_segment
+            ]
+        matches = [
+            item
+            for item in segments
+            if term.source in str(item.get("source", ""))
+            and term.target in str(item.get("target", ""))
+        ]
+        return len(matches) == 1
+
+    def _promote_confirmed_discoveries(self) -> None:
+        """Activate discovered candidates only after their Formal evidence survives review."""
+        if self._promotion_in_progress:
+            return
+        self._promotion_in_progress = True
+        try:
+            changed = False
+            updated: list[TermRule] = []
+            for term in self.document.terms:
+                if (
+                    term.status != "candidate"
+                    or term.origin != "discovered"
+                    or not self._formal_evidence_matches(term)
+                ):
+                    updated.append(term)
+                    continue
+                conflict = any(
+                    other is not term
+                    and other.status == "active"
+                    and other.source == term.source
+                    and other.target != term.target
+                    and _ranges_overlap(other, term)
+                    for other in self.document.terms
+                )
+                if conflict:
+                    updated.append(term)
+                    continue
+                updated.append(term.model_copy(update={"status": "active"}))
+                changed = True
+            if changed:
+                self.document = TerminologyDocument(
+                    groups=self.document.groups,
+                    terms=updated,
+                )
+                self.save()
+        finally:
+            self._promotion_in_progress = False
 
     def add_group(self, group_id: str, source_anchor: str, target_anchor: str) -> None:
         group_id = group_id.strip()
@@ -312,6 +393,14 @@ class TerminologyStore:
         }
         return [(first_by_key[key], count) for key, count in counts.items()]
 
+    @staticmethod
+    def _evidence_segment(discovery: dict[str, Any], chapter: int) -> int | None:
+        stable_id = str(discovery.get("segment_id", ""))
+        match = re.fullmatch(r"ch(\d+):s(\d+)(?::[0-9A-Za-z_-]+)?", stable_id)
+        if match and int(match.group(1)) == chapter:
+            return int(match.group(2))
+        return None
+
     def add_discoveries(
         self,
         chapter: int,
@@ -319,7 +408,7 @@ class TerminologyStore:
         source_text: str,
         target_text: str,
     ) -> list[TermRule]:
-        """Activate final-text-confirmed discoveries as soft hints."""
+        """Store discoveries as inactive candidates until Formal text confirms them."""
         added: list[TermRule] = []
         terms = list(self.terms)
         for discovery in discoveries:
@@ -329,13 +418,6 @@ class TerminologyStore:
                 continue
             if any(term.source == source and term.target == target for term in terms):
                 continue
-            has_conflict = any(
-                term.source == source
-                and term.target != target
-                and term.status == "active"
-                and term.applies_to_chapter(chapter)
-                for term in terms
-            )
             future_conflicts = [
                 term.valid_from
                 for term in terms
@@ -350,9 +432,12 @@ class TerminologyStore:
                 source=source,
                 target=target,
                 mode="preferred",
-                status="candidate" if has_conflict else "active",
+                status="candidate",
                 valid_from=chapter,
                 valid_to=valid_to,
+                origin="discovered",
+                evidence_chapter=chapter,
+                evidence_segment=self._evidence_segment(discovery, chapter),
             )
             terms.append(rule)
             added.append(rule)
