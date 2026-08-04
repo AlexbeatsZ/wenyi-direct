@@ -295,6 +295,91 @@ class TerminologyStore:
             self.save()
         return changed
 
+    def find_active_rule(
+        self,
+        source: str,
+        target: str,
+        *,
+        valid_from: int | None = None,
+        valid_to: int | None = None,
+    ) -> TermRule:
+        """Return the one active rule addressed by a whole-rule revision."""
+        matches = [
+            term
+            for term in self.terms
+            if term.status == "active"
+            and term.source == source
+            and term.target == target
+            and (valid_from is None or term.valid_from == valid_from)
+            and (valid_to is None or term.valid_to == valid_to)
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"expected exactly one active rule for {source!r} -> {target!r}; "
+                f"found {len(matches)}"
+            )
+        return matches[0]
+
+    def selected_source_count(
+        self,
+        chapter: int,
+        text: str,
+        source: str,
+        *,
+        target: str | None = None,
+    ) -> int:
+        """Count occurrences that survive longest-match terminology selection."""
+        return sum(
+            count
+            for term, count in self._selected_matches(chapter, text)
+            if term.source == source and (target is None or term.target == target)
+        )
+
+    def replace_rule(self, rule: TermRule, new_target: str) -> TermRule:
+        """Atomically replace one active rule while preserving its range and mode."""
+        new_target = new_target.strip()
+        if not new_target:
+            raise ValueError("new terminology target must be non-empty")
+        replacement = rule.model_copy(
+            update={
+                "target": new_target,
+                "status": "active",
+                "origin": None,
+                "evidence_chapter": None,
+                "evidence_segment": None,
+            }
+        )
+        replaced = 0
+        terms: list[TermRule] = []
+        for existing in self.terms:
+            same_rule = (
+                existing.source == rule.source
+                and existing.target == rule.target
+                and existing.valid_from == rule.valid_from
+                and existing.valid_to == rule.valid_to
+                and existing.status == "active"
+            )
+            if same_rule:
+                terms.append(replacement)
+                replaced += 1
+                continue
+            duplicate_replacement = (
+                existing.source == replacement.source
+                and existing.target == replacement.target
+                and existing.valid_from == replacement.valid_from
+                and existing.valid_to == replacement.valid_to
+            )
+            if duplicate_replacement:
+                continue
+            terms.append(existing)
+        if replaced != 1:
+            raise ValueError(
+                f"could not uniquely replace active rule {rule.source!r} -> {rule.target!r}"
+            )
+        self.document = TerminologyDocument(groups=self.groups, terms=terms)
+        self.save()
+        return replacement
+
     def visible(self, chapter: int, read_source: str) -> dict[str, Any]:
         """Backward-compatible alias for the translation-stage projection."""
         return self.visible_for_translation(chapter, read_source)
