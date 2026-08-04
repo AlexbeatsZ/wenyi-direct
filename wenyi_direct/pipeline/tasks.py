@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ..ingest.models import Chapter
 from ..prompts import (
@@ -15,7 +15,7 @@ from ..prompts import (
 )
 from .direct import DirectPipeline
 from .runstore import STATUS_DONE, STATUS_PENDING, RunStore
-from .types import RepairRegion, TranslationWindow, chapter_source_digest, segment_id
+from .types import TranslationWindow, chapter_source_digest
 
 _STAGE_NAMES = {
     "translate",
