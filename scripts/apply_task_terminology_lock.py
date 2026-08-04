@@ -3,15 +3,14 @@ from pathlib import Path
 path = Path("wenyi_direct/pipeline/tasks.py")
 text = path.read_text(encoding="utf-8")
 
-old = """        super().__init__(*args, **kwargs)
+lock_line = "        self._terminology_lock = threading.RLock()\n"
+while lock_line + lock_line in text:
+    text = text.replace(lock_line + lock_line, lock_line)
+if lock_line not in text:
+    old = """        super().__init__(*args, **kwargs)
         self._allow_provisional_factual_context = False
 """
-new = """        super().__init__(*args, **kwargs)
-        self._allow_provisional_factual_context = False
-        self._terminology_lock = threading.RLock()
-"""
-if old in text:
-    text = text.replace(old, new, 1)
+    text = text.replace(old, old + lock_line, 1)
 
 old = """            added_terms = self.terminology.add_discoveries(
                 chapter.index,
