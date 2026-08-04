@@ -29,7 +29,7 @@ def _config(tmp_path: Path) -> Config:
                 "max_write_chars": 10000,
                 "source_halo_chars": 1000,
             },
-            "pipeline": {"repair_context_segments": 0},
+            "pipeline": {"repair_context_segments": 0, "max_language_rechecks": 0},
         }
     )
 
