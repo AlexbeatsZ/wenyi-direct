@@ -15,12 +15,6 @@ from ..ingest.segmenter import load_document
 from ..llm.base import LLMClient
 from ..llm.json_parser import JSONParseError
 from ..prompts import (
-    CHINESE_FINDING_VALIDATION_SYSTEM,
-    CHINESE_READER_SYSTEM,
-    FACTUAL_AUDIT_SYSTEM,
-    FIDELITY_SYSTEM,
-    REPAIR_SYSTEM,
-    TRANSLATION_SYSTEM,
     chinese_finding_validation_messages,
     chinese_reader_messages,
     factual_audit_messages,
@@ -161,31 +155,6 @@ class DirectPipeline:
             raise RuntimeError(
                 f"chapter {chapter_index} source changed after shadow creation"
             )
-        current_policy = self._policy_fingerprint()
-        if shadow and shadow.get("policy_fingerprint") not in {None, current_policy}:
-            expected = {
-                segment_id(chapter.index, segment) for segment in chapter.text_segments
-            }
-            completed = set(shadow.get("translated_ids", []))
-            if completed != expected:
-                phase = "translate"
-            elif self.config.pipeline.factual_audit:
-                phase = "factual_audit"
-            elif self.config.pipeline.chinese_reader_audit:
-                phase = "chinese_audit"
-            else:
-                phase = "promote"
-            previous_policy = shadow.get("policy_fingerprint")
-            shadow["phase"] = phase
-            shadow.pop("chinese_state", None)
-            self._save_shadow(store, chapter.index, shadow)
-            store.log_event(
-                "shadow_policy_invalidated",
-                chapter=chapter.index,
-                previous_policy=previous_policy,
-                current_policy=current_policy,
-                restart_phase=phase,
-            )
         if not shadow:
             shadow = {
                 "schema": 1,
@@ -197,10 +166,6 @@ class DirectPipeline:
                 },
                 "translated_ids": [],
             }
-            self._save_shadow(store, chapter_index, shadow)
-        elif shadow.get("policy_fingerprint") is None:
-            # Legacy shadows can resume without discarding paid model work. All current
-            # promotion gates still run, and subsequent policy changes are fingerprinted.
             self._save_shadow(store, chapter_index, shadow)
         self._clean_shadow_control_metadata(store, chapter, shadow)
         store.set_chapter_fields(chapter_index, phase=shadow["phase"], error=None)
@@ -233,26 +198,10 @@ class DirectPipeline:
     def _save_targets(shadow: dict[str, Any], targets: dict[int, str]) -> None:
         shadow["targets"] = {str(index): target for index, target in targets.items()}
 
-    def _policy_fingerprint(self) -> str:
-        payload = {
-            "config": self.config.model_dump(mode="json"),
-            "terminology": self.terminology.document.model_dump(mode="json"),
-            "prompts": [
-                TRANSLATION_SYSTEM,
-                FACTUAL_AUDIT_SYSTEM,
-                CHINESE_READER_SYSTEM,
-                CHINESE_FINDING_VALIDATION_SYSTEM,
-                REPAIR_SYSTEM,
-                FIDELITY_SYSTEM,
-            ],
-        }
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
-
+    @staticmethod
     def _save_shadow(
-        self, store: RunStore, chapter_index: int, shadow: dict[str, Any]
+        store: RunStore, chapter_index: int, shadow: dict[str, Any]
     ) -> None:
-        shadow["policy_fingerprint"] = self._policy_fingerprint()
         store.save_shadow(chapter_index, shadow)
 
     def _clean_shadow_control_metadata(
