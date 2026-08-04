@@ -110,6 +110,56 @@ def test_agy_large_prompt_never_enters_windows_argv(tmp_path, monkeypatch) -> No
     assert max(map(len, captured["args"])) < 1_000
 
 
+def test_agy_never_uses_stderr_as_model_response(tmp_path, monkeypatch) -> None:
+    calls = 0
+
+    def fake_run(args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout="",
+            stderr="warning: no response body",
+        )
+
+    monkeypatch.setattr("wenyi_direct.llm.providers.agy.subprocess.run", fake_run)
+    client = AgyClient(
+        LLMConfig(
+            provider="agy",
+            cwd=str(tmp_path),
+            tiers={"strong": TierConfig(model="gemini-3.6-flash-high")},
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="没有返回模型正文"):
+        client.complete([{"role": "user", "content": "hello"}], json_mode=True)
+    assert calls == 3
+
+
+def test_agy_returns_stdout_when_stderr_contains_warning(tmp_path, monkeypatch) -> None:
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout='{"ok":true}',
+            stderr="warning: diagnostic only",
+        )
+
+    monkeypatch.setattr("wenyi_direct.llm.providers.agy.subprocess.run", fake_run)
+    client = AgyClient(
+        LLMConfig(
+            provider="agy",
+            cwd=str(tmp_path),
+            tiers={"strong": TierConfig(model="gemini-3.6-flash-high")},
+        )
+    )
+
+    assert json.loads(
+        client.complete([{"role": "user", "content": "hello"}], json_mode=True)
+    ) == {"ok": True}
+
+
 def test_anthropic_messages_wire_format(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_TEST_KEY", "secret")
     client = AnthropicCompatibleClient(
