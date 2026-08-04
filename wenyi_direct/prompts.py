@@ -19,6 +19,7 @@ active hard 术语必须采用；active preferred 术语只是建议，以自然
 FACTUAL_AUDIT_SYSTEM = """你是文学翻译的事实审校员。逐项比较原文与中文，检查误译、漏译、增译、指代、主语、说话者、时态、否定、数量、术语和跨段语义关系。
 只报告有原文证据的问题。定位症状段，也定位造成问题的最早/最晚因果段；问题可能跨越多段。不要做纯粹的文风润色。
 输入中的 current_terminology 只是当前翻译采用的既有约定，不是不可质疑的事实。即使某条约定当前标记为 hard，也要根据原文和作品语境检查译名本身、适用范围和多义性是否正确；不得为了服从旧术语而放过明确误译。
+若证据足以说明某一条完整的现行术语规则本身错误，而不只是当前语境例外，可提出 entire_existing_rule 修订，并列出直接支持判断的 evidence_ids。若只是多义词在当前句不适用、范围需要拆分或证据仍不足，应报告普通 term 问题，不得提出全规则替换。
 可顺便提取明确的专名、设定名、稳定称呼，以及在本作中反复承担固定指称或固定翻译作用的普通名词短语。每个候选必须指出本窗口中支持该对应关系的 segment_id。不要仅因词频高就抽取普通词；多义动词、形容词和描写词只有在当前语义条件明确、确实形成稳定设定表达时才可提出。
 短句也必须检查词典义直拼造成的不成立中文搭配，并依据上下文中的话语功能判断是否误译；不要因为字数少就略过。"""
 
@@ -27,6 +28,13 @@ REPAIR_SYSTEM = """你是文学翻译修复者。根据给出的审校问题，�
 
 FIDELITY_SYSTEM = """你是严格的源文忠实度验证员。逐一检查每个 changed=true 的稳定 ID，判断候选中文是否在给定上下文中准确、完整，且没有凭空增加事实；任何一个 changed ID 不合格，整体 valid 必须为 false。
 自然的中文重组不是错误。current_terminology 只是现行译法约定，不是不可质疑的真理；若当前源文明确表明现行译名错误、范围过宽或语义不适用，应据此报告，而不是要求候选盲目改回。preferred 更不能作为质量门。若不合格，给出可以直接指导下一次修复的简短问题。"""
+
+TERM_REVISION_VALIDATION_SYSTEM = """你负责独立验证一项术语全规则修订建议。
+只有证据足以证明当前 source→old_target 这一整条既有规则本身错误，并且 new_target 可安全替代该规则适用范围内的旧译名时，才批准 entire_existing_rule 修订。
+若问题只发生在当前语境、该源词存在需要分流的多义用法、证据不足以覆盖整条规则，或新译名只是风格偏好，必须拒绝全规则修订。现行 hard 标记不是正确性的证明，也不得阻止你质疑旧译名。只返回要求的 JSON。"""
+
+TERM_MIGRATION_REPAIR_SYSTEM = """你负责修复一处无法机械迁移的既有译文。
+术语规则已经确认应从 old_target 改为 new_target。结合当前源文和邻近上下文，只重写 scope=WRITE 的完整中文，使对应 source 明确采用 new_target，同时保持其余事实、语气、人物声音和自然中文不变。不要把普通描写中碰巧相同的词一并替换。只返回 required_output 结构的 JSON。"""
 
 # Deliberately contains no translation instructions and receives no source material.
 CHINESE_READER_SYSTEM = """你负责机器翻译文稿上线前的中文阅读验收。你的任务不是普通文学鉴赏，而是阻止“语法勉强可解析，但真实中文中不成立”的译文进入成品。
@@ -144,6 +152,16 @@ def factual_audit_messages(
                     "target": "当前译文中实际采用的稳定译法",
                 }
             ],
+            "term_revisions": [
+                {
+                    "source": "现行完整术语源词",
+                    "old_target": "当前规则译名",
+                    "new_target": "建议替换后的译名",
+                    "scope": "entire_existing_rule",
+                    "evidence_ids": ["直接支持全规则修订的当前窗口稳定 ID"],
+                    "reason": "为什么旧规则整体错误，而非单句例外",
+                }
+            ],
         },
     }
     return [
@@ -151,6 +169,76 @@ def factual_audit_messages(
         {
             "role": "user",
             "content": "审查 audit=true 的段落，可用其余段落作只读语境。只返回 JSON。\n"
+            + json.dumps(payload, ensure_ascii=False),
+        },
+    ]
+
+
+def term_revision_validation_messages(
+    chapter: Chapter,
+    revision: dict,
+    read_indexes: tuple[int, ...],
+    targets: dict[int, str],
+    knowledge: dict,
+) -> list[dict[str, str]]:
+    payload = {
+        "revision": revision,
+        "knowledge": _challengeable_knowledge(knowledge),
+        "segments": [
+            {
+                "id": segment_id(chapter.index, chapter.segments[index]),
+                "source": chapter.segments[index].source,
+                "target": targets[index],
+            }
+            for index in read_indexes
+        ],
+        "output_schema": {
+            "approved": True,
+            "reason": "批准或拒绝全规则修订的依据",
+        },
+    }
+    return [
+        {"role": "system", "content": TERM_REVISION_VALIDATION_SYSTEM},
+        {
+            "role": "user",
+            "content": "验证该 entire_existing_rule 术语修订。只返回 JSON。\n"
+            + json.dumps(payload, ensure_ascii=False),
+        },
+    ]
+
+
+def term_migration_repair_messages(
+    chapter: Chapter,
+    revision: dict,
+    read_indexes: tuple[int, ...],
+    write_index: int,
+    targets: dict[int, str],
+) -> list[dict[str, str]]:
+    payload = {
+        "revision": revision,
+        "segments": [
+            {
+                "id": segment_id(chapter.index, chapter.segments[index]),
+                "scope": "WRITE" if index == write_index else "READ_ONLY",
+                "source": chapter.segments[index].source,
+                "current_target": targets[index],
+            }
+            for index in read_indexes
+        ],
+        "required_output": {
+            "translations": [
+                {
+                    "id": segment_id(chapter.index, chapter.segments[write_index]),
+                    "target": "迁移术语后的完整中文",
+                }
+            ]
+        },
+    }
+    return [
+        {"role": "system", "content": TERM_MIGRATION_REPAIR_SYSTEM},
+        {
+            "role": "user",
+            "content": "修复 scope=WRITE 的术语迁移歧义。只返回 JSON。\n"
             + json.dumps(payload, ensure_ascii=False),
         },
     ]
