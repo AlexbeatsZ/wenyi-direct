@@ -75,12 +75,27 @@ def translate(
     chapters: str | None = typer.Option(
         None, help="Optional indexes/ranges, e.g. 0,2-4. Default resumes all pending chapters."
     ),
+    restart_from: str | None = typer.Option(
+        None,
+        "--restart-from",
+        help=(
+            "Explicitly discard later Shadow work and restart selected chapters from "
+            "translate, factual-audit, or chinese-audit."
+        ),
+    ),
 ) -> None:
-    """Resume direct translation and all configured quality gates."""
+    """Resume translation, or explicitly restart selected stages when requested."""
     cfg = _load(config)
     clients = build_clients(cfg)
     pipeline = DirectPipeline(cfg, clients, config_dir=config.resolve().parent)
-    store = pipeline.run(source, chapters=_parse_chapters(chapters))
+    try:
+        store = pipeline.run(
+            source,
+            chapters=_parse_chapters(chapters),
+            restart_from=restart_from,
+        )
+    except ValueError as error:
+        raise typer.BadParameter(str(error), param_hint="--restart-from") from error
     _print_status(store)
 
 
