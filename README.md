@@ -64,6 +64,54 @@ uv run wenyi-direct translate path\to\book.epub --config config.yaml \
 Source-file and chapter digests remain only to prevent stale segmented state from
 silently resuming against changed input.
 
+## Granular tasks
+
+Every major task can be run independently. Audit-only commands persist their findings
+and stop before any repair model is called. Repair commands require the corresponding
+audit checkpoint and refuse to guess or silently run a missing earlier task.
+
+```powershell
+uv run wenyi-direct stage translate path\to\book.epub --chapters 0-3 --config config.yaml
+uv run wenyi-direct stage factual-audit path\to\book.epub --chapters 0-3 --config config.yaml
+uv run wenyi-direct stage factual-repair path\to\book.epub --chapters 0-3 --config config.yaml
+uv run wenyi-direct stage chinese-audit path\to\book.epub --chapters 0-3 --config config.yaml
+uv run wenyi-direct stage chinese-repair path\to\book.epub --chapters 0-3 --config config.yaml
+uv run wenyi-direct stage promote path\to\book.epub --chapters 0-3 --config config.yaml
+```
+
+The persisted `phase` remains the broad state-machine phase. The manifest's `task`
+field shows the next granular command, such as `factual-repair` or `chinese-repair`.
+Re-running a completed audit task is idempotent and reuses its stored batches.
+
+## Staggered fast pipeline
+
+```powershell
+uv run wenyi-direct pipeline fast path\to\book.epub --chapters 0-20 --config config.yaml
+```
+
+This mode uses two model lanes with a one-chapter offset:
+
+```text
+concurrently:
+  chapter N:   Chinese audit -> Chinese repair -> promote
+  chapter N+1: translate -> factual audit
+then:
+  chapter N+1: factual repair
+```
+
+Factual repair is deliberately outside the overlap window because terminology
+migration may rewrite earlier translated chapters. The next chapter may use the
+previous chapter's completed **factual snapshot** as provisional past context while
+the previous chapter is undergoing Chinese-only review.
+It never receives the previous chapter's uncorrected direct draft. Once the previous
+chapter reaches Formal, normal Formal past context is used again.
+
+The command holds the book's process lock for the entire run, so a second CLI process
+cannot mutate the same book concurrently. Within that process, only independent
+chapter work overlaps; shared manifest, event, artifact, and usage writes are
+serialized. A failed lane stops the pair and leaves both chapters at their persisted
+checkpoints for normal resume.
+
 ## Supported model transports
 
 - `codex-cli`: isolated `codex exec --ephemeral --ignore-user-config --ignore-rules`
@@ -86,6 +134,9 @@ uv run wenyi-direct status path\to\book.epub --config config.yaml
 uv run wenyi-direct monitor path\to\book.epub --config config.yaml
 uv run wenyi-direct assemble path\to\book.epub --config config.yaml --format epub
 
+# fastest two-lane chapter schedule
+uv run wenyi-direct pipeline fast path\to\book.epub --config config.yaml
+
 # terminology seed management
 uv run wenyi-direct terms group-add flame 炎 火焰 --config config.yaml
 uv run wenyi-direct terms add 炎魔法 火焰魔法 --group flame --mode hard --config config.yaml
@@ -97,9 +148,10 @@ uv run wenyi-direct terms revise path\to\book.epub \
   --config config.yaml
 ```
 
-If an explicit terminology migration encounters ambiguous existing wording, it changes
-nothing, saves a migration plan under the book state directory, and reports the exact
-locations that require model-assisted or manual resolution.
+An explicit terminology migration changes deterministic occurrences directly and, by
+default, immediately sends ambiguous existing wording through repair plus fidelity
+validation. Add `--no-model` to make ambiguity leave all text unchanged and only emit a
+saved migration plan with exact affected locations.
 
 Inputs: EPUB, FB2, TXT, Markdown, HTML, PDF, and the documented JSON interchange
 format. Outputs: EPUB, TXT, Markdown, HTML, or JSON.
