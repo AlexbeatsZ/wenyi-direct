@@ -18,8 +18,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Install project
         run: uv sync --dev
-      - name: Apply boundary patch
-        run: python scripts/apply_task_boundary_patch.py
+      - name: Apply boundary and terminology patches
+        run: |
+          python scripts/apply_task_boundary_patch.py
+          python scripts/apply_task_terminology_lock.py
       - name: Format and lint
         run: uv run ruff check . --fix --unsafe-fixes
       - name: Commit patch
@@ -30,7 +32,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Enforce audit-only boundaries in staged execution"
+          git commit -m "Serialize terminology access in staggered execution"
           git push
       - name: Lint
         run: uv run ruff check .
