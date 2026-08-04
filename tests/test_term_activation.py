@@ -5,7 +5,6 @@ from pathlib import Path
 
 from wenyi_direct.ingest.models import Chapter, Segment
 from wenyi_direct.pipeline.knowledge import TermRule, TerminologyDocument, TerminologyStore
-from wenyi_direct.pipeline.types import segment_id
 from wenyi_direct.prompts import (
     factual_audit_messages,
     fidelity_validation_messages,
