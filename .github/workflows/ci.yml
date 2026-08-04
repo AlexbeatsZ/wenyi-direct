@@ -20,13 +20,13 @@ jobs:
           enable-cache: true
       - name: Install project
         run: uv sync --dev
-      - name: Isolate checkpoint merge test from language recheck
+      - name: Apply final legacy-test updates
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          path = Path("tests/test_checkpoints.py")
-          text = path.read_text(encoding="utf-8")
+          checkpoint = Path("tests/test_checkpoints.py")
+          text = checkpoint.read_text(encoding="utf-8")
           old = '"pipeline": {"repair_context_segments": 0},'
           new = (
               '"pipeline": {'
@@ -35,7 +35,22 @@ jobs:
               '},'
           )
           if old in text:
-              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+              checkpoint.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          pipeline = Path("tests/pipeline_core_cases.py")
+          text = pipeline.read_text(encoding="utf-8")
+          old = '''    assert len(language_repair_calls) == 1
+    language_payload = _payload(language_repair_calls[0]["messages"])
+    assert len(language_payload["required_output"]["translations"]) == 2
+'''
+          new = '''    assert len(language_repair_calls) == 2
+    assert sorted(
+        len(_payload(call["messages"])["required_output"]["translations"])
+        for call in language_repair_calls
+    ) == [1, 1]
+'''
+          if old in text:
+              pipeline.write_text(text.replace(old, new, 1), encoding="utf-8")
           PY
       - name: Apply Ruff fixes once
         run: uv run ruff check . --fix --unsafe-fixes
@@ -47,7 +62,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Apply automated test and Ruff fixes"
+          git commit -m "Update legacy tests for bounded rechecks"
           git push
       - name: Lint
         run: uv run ruff check .
