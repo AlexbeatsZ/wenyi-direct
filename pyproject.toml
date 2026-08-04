@@ -22,7 +22,7 @@ dependencies = [
 dev = ["pytest>=8.0", "ruff>=0.9"]
 
 [project.scripts]
-wenyi-direct = "wenyi_direct.cli:app"
+wenyi-direct = "wenyi_direct.command_app:app"
 
 [build-system]
 requires = ["hatchling"]
