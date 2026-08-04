@@ -1,45 +1,79 @@
 # Wenyi Direct
 
-Wenyi Direct is a new, simpler literary-translation pipeline derived from the
-engineering shell of [Wenyi](https://github.com/BigDawnGhost/wenyi). It deliberately
-does not use cheap draft translation, mandatory whole-book analysis, default
-polishing, back-translation, or blind re-review.
+Wenyi Direct is a focused literary-translation pipeline derived from the engineering
+shell of [Wenyi](https://github.com/BigDawnGhost/wenyi). It deliberately avoids a
+cheap draft, mandatory whole-book analysis, default polishing, back-translation, and
+blind final re-review.
 
 Its quality path is:
 
 1. A strong model directly translates a full chapter whenever the configured
-   context/output budget permits. Long chapters use a bidirectional source halo.
-2. A source-aware factual audit reports concrete meaning problems; related findings
-   are repaired over their explicit causal region and verified against the source.
-   Neighboring context remains read-only.
-3. A Chinese Reader Audit sees only reader-visible Chinese. Its findings are then
-   checked against neighboring source before any repair, followed by source-fidelity
-   validation of changed regions.
-4. The reviewed shadow chapter atomically becomes formal text. Every proposal and
-   input snapshot remains append-only under the run's `artifacts/` directory.
+   context/output budget permits. Long chapters retain source on both sides of the
+   writable range.
+2. A checkpointed source-aware factual audit reports concrete meaning problems and
+   may challenge existing terminology. Approved whole-rule terminology corrections
+   are migrated immediately across existing Formal and Shadow text.
+3. Remaining factual findings are merged into causal repair ranges and verified
+   against the source.
+4. A Chinese Reader Audit sees only reader-visible Chinese. Its findings are checked
+   against nearby source, globally merged into non-overlapping repair ranges, repaired,
+   fidelity-validated, and optionally rechecked once in Chinese.
+5. The reviewed Shadow chapter atomically becomes Formal text. Every proposal, input
+   snapshot, audit, migration, and accepted stage remains traceable under the run's
+   state directory.
 
-No future chapter is required. A bounded raw tail from completed chapters supplies
-past-only context as a serial work progresses.
+No future chapter is required. A strictly bounded raw tail from completed chapters
+supplies past-only context as a serial work progresses.
+
+## Terminology
 
 Terminology supports translation-sharing groups plus per-term `mode`, `status`,
-chapter range, and optional pronoun guidance. Factual audit can discover stable names,
-setting expressions, and ordinary noun phrases that repeatedly need one stable
-translation without another model call. Non-conflicting discoveries become soft
-active preferences, conflicts remain inactive candidates, and rejected mappings stay
-out. Pronoun guidance remains local to a retrieved term; the pipeline does not infer
-or persist an active speaker/referent across later windows. Hard rules are checked
-mechanically during repair and before final promotion. Model discoveries live in the
-current book's state rather than the shared terminology seed file.
+chapter range, and optional pronoun guidance.
+
+- Translation and repair calls treat active `hard` rules as constraints and active
+  `preferred` rules as suggestions.
+- Reviewers receive those mappings as challengeable current conventions. An incorrect
+  hard rule is therefore not immune to factual review.
+- Model discoveries begin as inactive candidates. They become active preferences only
+  after their supporting chapter reaches Formal and still contains the same mapping.
+- A separately validated whole-rule correction is migrated immediately by
+  source-anchored search. Deterministic one-to-one occurrences are changed directly;
+  ambiguous live occurrences are repaired by the model and fidelity-validated in the
+  same migration. Historical snapshots that cannot be migrated safely are invalidated.
+
+All discoveries and revisions live in `state/<book>/terminology.yaml`; the shared seed
+file is never mutated by translation.
+
+## State and explicit restart
+
+Normal translation resumes exactly from persisted phases, audit windows, validations,
+and completed repair regions. Prompt, model, configuration, or terminology changes do
+not automatically discard paid work.
+
+Use an explicit restart when you want to rerun a stage:
+
+```powershell
+uv run wenyi-direct translate path\to\book.epub --config config.yaml \
+  --restart-from translate
+uv run wenyi-direct translate path\to\book.epub --config config.yaml \
+  --restart-from factual-audit
+uv run wenyi-direct translate path\to\book.epub --config config.yaml \
+  --restart-from chinese-audit
+```
+
+Source-file and chapter digests remain only to prevent stale segmented state from
+silently resuming against changed input.
 
 ## Supported model transports
 
 - `codex-cli`: isolated `codex exec --ephemeral --ignore-user-config --ignore-rules`
-- `agy`: sandboxed temporary-TXT requests with a short `agy --print` instruction
+- `agy`: sandboxed temporary-TXT requests with a short `agy --print` instruction;
+  only stdout is accepted as model output
 - `openai-compatible`: `/chat/completions` services
 - `anthropic-compatible`: Anthropic Messages-compatible `/v1/messages` services
 
-Each stage may use a different transport, or all stages may share one model. API
-keys are named by `api_key_env` in YAML and supplied through environment variables.
+Each stage may use a different transport, or all stages may share one model. API keys
+are named by `api_key_env` in YAML and supplied through environment variables.
 
 ## Quick start
 
@@ -52,24 +86,34 @@ uv run wenyi-direct status path\to\book.epub --config config.yaml
 uv run wenyi-direct monitor path\to\book.epub --config config.yaml
 uv run wenyi-direct assemble path\to\book.epub --config config.yaml --format epub
 
-# terminology lifecycle
+# terminology seed management
 uv run wenyi-direct terms group-add flame 炎 火焰 --config config.yaml
 uv run wenyi-direct terms add 炎魔法 火焰魔法 --group flame --mode hard --config config.yaml
 uv run wenyi-direct terms set-status 炎魔法 active --config config.yaml
+
+# immediately migrate a confirmed book-local whole-rule correction
+uv run wenyi-direct terms revise path\to\book.epub \
+  --source 黒炎 --old-target 黑色火焰 --new-target 黑炎 \
+  --config config.yaml
 ```
+
+If an explicit terminology migration encounters ambiguous existing wording, it changes
+nothing, saves a migration plan under the book state directory, and reports the exact
+locations that require model-assisted or manual resolution.
 
 Inputs: EPUB, FB2, TXT, Markdown, HTML, PDF, and the documented JSON interchange
 format. Outputs: EPUB, TXT, Markdown, HTML, or JSON.
 
 See [docs/architecture.md](docs/architecture.md) and
-[docs/providers.md](docs/providers.md) for the precise boundaries and configuration.
-The [format reference](docs/formats.md) documents JSON/game-script interchange.
-Sanitized methods, compact results, and selected excerpts from model comparisons are
-published in [experiments/](experiments/README.md).
+[docs/providers.md](docs/providers.md) for precise boundaries and configuration. The
+[format reference](docs/formats.md) documents JSON/game-script interchange. Sanitized
+methods, compact results, and selected excerpts from model comparisons are published
+in [experiments/](experiments/README.md).
 
 ## Provenance
 
 Document ingestion/assembly, resumable storage, and the Codex/Agy/OpenAI-compatible
-adapter foundations are reused from Wenyi under the included MIT license. The
-translation policy, prompts, repair planning, Chinese-only audit boundary,
-Anthropic-compatible adapter, and command-line orchestration are new here.
+adapter foundations are reused from Wenyi under the included MIT license. The direct
+translation policy, scoped repair planning, Chinese-only audit boundary,
+Anthropic-compatible adapter, terminology revision migration, and current command-line
+orchestration are new here.
