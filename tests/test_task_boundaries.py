@@ -3,11 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from test_task_commands import _config, _stage_handler, _write_book
 
 from wenyi_direct.llm.providers.fake import FakeClient
 from wenyi_direct.pipeline.tasks import StageTaskError, TaskPipeline
-
-from .test_task_commands import _config, _stage_handler, _write_book
 
 
 def _pipeline(tmp_path: Path) -> tuple[TaskPipeline, FakeClient]:
