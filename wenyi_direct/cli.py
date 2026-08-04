@@ -290,6 +290,11 @@ def revise_term(
     valid_from: int | None = typer.Option(None, min=0),
     valid_to: int | None = typer.Option(None, min=0),
     reason: str = typer.Option("", help="Reason recorded with the migration plan."),
+    no_model: bool = typer.Option(
+        False,
+        "--no-model",
+        help="Do not resolve ambiguous existing wording with repair/fidelity model calls.",
+    ),
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True),
 ) -> None:
     """Immediately migrate a confirmed whole-rule terminology revision."""
@@ -311,7 +316,21 @@ def revise_term(
     )
     try:
         with store.lock():
-            result = TermMigrationService(store, terminology).revise(revision)
+            service = TermMigrationService(store, terminology)
+            plan = service.plan(revision)
+            resolver = None
+            if plan.ambiguous_uses and not no_model:
+                clients = build_clients(cfg)
+                pipeline = DirectPipeline(
+                    cfg,
+                    clients,
+                    config_dir=config.resolve().parent,
+                )
+                pipeline._activate_terminology_for(store)
+                resolver = lambda use, accepted: pipeline._resolve_term_migration_use(
+                    store, use, accepted
+                )
+            result = service.apply(plan, resolver=resolver)
     except TermMigrationNeedsReview as error:
         table = Table(title=f"Ambiguous terminology uses: {error.plan.migration_id}")
         table.add_column("Chapter", justify="right")
@@ -338,7 +357,8 @@ def revise_term(
     console.print(
         f"Migrated {result.replacement_rule.source}: "
         f"{old_target} -> {result.replacement_rule.target}; "
-        f"edits={result.applied_edits}, invalidated_snapshots="
+        f"edits={result.applied_edits}, model_resolved={result.model_resolved_edits}, "
+        f"invalidated_snapshots="
         f"{sum(len(items) for items in result.invalidated_snapshots.values())}"
     )
 
