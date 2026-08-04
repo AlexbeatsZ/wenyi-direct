@@ -31,10 +31,28 @@ def _legacy_config(tmp_path):
 
 _CORE._config = _legacy_config
 
-_REWRITTEN = {"test_japanese_translation_guardrails_are_general_not_case_specific"}
+_REWRITTEN = {
+    "test_full_pipeline_and_chinese_audit_information_boundary",
+    "test_japanese_translation_guardrails_are_general_not_case_specific",
+}
 for _name in dir(_CORE):
     if _name.startswith("test_") and _name not in _REWRITTEN:
         globals()[_name] = getattr(_CORE, _name)
+
+
+def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) -> None:
+    previous_config = _CORE._config
+
+    def merged_repair_config(path: Path):
+        config = previous_config(path)
+        config.pipeline.repair_context_segments = 1
+        return config
+
+    _CORE._config = merged_repair_config
+    try:
+        _CORE.test_full_pipeline_and_chinese_audit_information_boundary(tmp_path)
+    finally:
+        _CORE._config = previous_config
 
 
 def test_japanese_translation_guardrails_are_general_not_case_specific() -> None:
