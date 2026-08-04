@@ -81,6 +81,7 @@ class TaskPipeline(DirectPipeline):
         super().__init__(*args, **kwargs)
         self._allow_provisional_factual_context = False
         self._terminology_lock = threading.RLock()
+        self._terminology_lock = threading.RLock()
 
     @staticmethod
     def normalise_task(value: str) -> str:
@@ -260,6 +261,7 @@ class TaskPipeline(DirectPipeline):
     ) -> None:
         chapter = store.load_chapter(chapter_index)
         shadow = self._ensure_shadow(store, chapter)
+        self._validate_task(chapter_index, shadow, task)
         self._validate_task(chapter_index, shadow, task)
         self._validate_task(chapter_index, shadow, task)
         self._validate_task(chapter_index, shadow, task)
