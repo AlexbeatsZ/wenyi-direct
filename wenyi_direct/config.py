@@ -77,6 +77,7 @@ class PipelineConfig(BaseModel):
     chinese_reader_audit: bool = True
     max_repair_attempts: int = 2
     repair_context_segments: int = 2
+    max_language_rechecks: int = Field(default=1, ge=0, le=1)
     translation_tier: str = "strong"
     audit_tier: str = "strong"
     repair_tier: str = "strong"
@@ -194,6 +195,7 @@ pipeline:
   chinese_reader_audit: true
   max_repair_attempts: 2
   repair_context_segments: 2
+  max_language_rechecks: 1
 
 segment:
   # 0 keeps author paragraphs intact. Set only for exceptionally long paragraphs.
