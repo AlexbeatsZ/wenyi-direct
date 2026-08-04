@@ -80,6 +80,7 @@ class TaskPipeline(DirectPipeline):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._allow_provisional_factual_context = False
+        self._terminology_lock = threading.RLock()
 
     @staticmethod
     def normalise_task(value: str) -> str:
@@ -259,6 +260,7 @@ class TaskPipeline(DirectPipeline):
     ) -> None:
         chapter = store.load_chapter(chapter_index)
         shadow = self._ensure_shadow(store, chapter)
+        self._validate_task(chapter_index, shadow, task)
         self._validate_task(chapter_index, shadow, task)
         self._validate_task(chapter_index, shadow, task)
         self._validate_task(chapter_index, shadow, task)
@@ -468,12 +470,13 @@ class TaskPipeline(DirectPipeline):
                 and isinstance(response.get("term_revisions", []), list)
                 else []
             )
-            added_terms = self.terminology.add_discoveries(
-                chapter.index,
-                discoveries,
-                source,
-                "\n".join(targets[index] for index in window.read_indexes),
-            )
+            with self._terminology_lock:
+                added_terms = self.terminology.add_discoveries(
+                    chapter.index,
+                    discoveries,
+                    source,
+                    "\n".join(targets[index] for index in window.read_indexes),
+                )
             batch = {
                 "read_indexes": list(window.read_indexes),
                 "write_indexes": list(window.write_indexes),
@@ -630,10 +633,17 @@ class TaskPipeline(DirectPipeline):
         state["audit_complete"] = True
         self._save_shadow(store, chapter.index, shadow)
 
+    def _promote(
+        self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
+    ) -> None:
+        with self._terminology_lock:
+            super()._promote(store, chapter, shadow)
+
     def _knowledge_for(
         self, store: RunStore, chapter: Chapter, read_source: str
     ) -> dict[str, Any]:
-        knowledge = super()._knowledge_for(store, chapter, read_source)
+        with self._terminology_lock:
+            knowledge = super()._knowledge_for(store, chapter, read_source)
         if not self._allow_provisional_factual_context or chapter.index <= 0:
             return knowledge
         manifest = store.load_manifest()
