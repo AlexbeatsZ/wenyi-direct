@@ -10,7 +10,6 @@ from wenyi_direct.prompts import (
     TRANSLATION_SYSTEM,
 )
 
-
 _CORE_PATH = Path(__file__).with_name("pipeline_core_cases.py")
 _SPEC = importlib.util.spec_from_file_location("wenyi_pipeline_core_cases", _CORE_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
