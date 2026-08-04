@@ -100,6 +100,12 @@ class TaskPipeline(DirectPipeline):
         store = self.prepare(source_path)
         with store.lock():
             selected = self._selected_chapters(store, chapters)
+            if chapters is None:
+                selected = [
+                    index
+                    for index in selected
+                    if self._task_is_ready(store, index, task)
+                ]
             for chapter_index in selected:
                 try:
                     self._run_task_locked(store, chapter_index, task)
@@ -122,7 +128,7 @@ class TaskPipeline(DirectPipeline):
         with store.lock():
             self._allow_provisional_factual_context = True
             try:
-                self._run_upstream(concurrent_store, selected[0])
+                self._run_upstream_full(concurrent_store, selected[0])
                 previous = selected[0]
                 for current in selected[1:]:
                     concurrent_store.log_event(
@@ -135,10 +141,11 @@ class TaskPipeline(DirectPipeline):
                             self._run_downstream, concurrent_store, previous
                         )
                         upstream = executor.submit(
-                            self._run_upstream, concurrent_store, current
+                            self._run_upstream_audit, concurrent_store, current
                         )
                         downstream.result()
                         upstream.result()
+                    self._run_upstream_repair(concurrent_store, current)
                     concurrent_store.log_event(
                         "staggered_pair_completed",
                         chinese_chapter=previous,
@@ -151,6 +158,18 @@ class TaskPipeline(DirectPipeline):
             finally:
                 self._allow_provisional_factual_context = False
         return store
+
+    def _task_is_ready(self, store: RunStore, chapter_index: int, task: str) -> bool:
+        manifest = store.load_manifest()
+        status = {
+            int(item["index"]): item.get("status") for item in manifest["chapters"]
+        }
+        if status.get(chapter_index) == STATUS_DONE:
+            return False
+        shadow = store.load_shadow(chapter_index)
+        if not isinstance(shadow, dict):
+            return task == "translate"
+        return self._next_task(shadow) == task
 
     @staticmethod
     def _selected_chapters(
@@ -210,11 +229,37 @@ class TaskPipeline(DirectPipeline):
                 f"chapter {chapter} cannot run {task}: phase is {actual}, expected {expected}"
             )
 
+    def _validate_task(
+        self, chapter_index: int, shadow: dict[str, Any], task: str
+    ) -> None:
+        expected = {
+            "translate": "translate",
+            "factual-audit": "factual_audit",
+            "factual-repair": "factual_audit",
+            "chinese-audit": "chinese_audit",
+            "chinese-repair": "chinese_audit",
+            "promote": "promote",
+        }[task]
+        self._require_phase(chapter_index, shadow, expected, task)
+        if task == "factual-repair":
+            state = shadow.get("factual_state", {})
+            if not isinstance(state, dict) or state.get("audit_complete") is not True:
+                raise StageTaskError(
+                    f"chapter {chapter_index} requires factual-audit before factual-repair"
+                )
+        if task == "chinese-repair":
+            state = shadow.get("chinese_state", {})
+            if not isinstance(state, dict) or state.get("audit_complete") is not True:
+                raise StageTaskError(
+                    f"chapter {chapter_index} requires chinese-audit before chinese-repair"
+                )
+
     def _run_task_locked(
         self, store: RunStore, chapter_index: int, task: str
     ) -> None:
         chapter = store.load_chapter(chapter_index)
         shadow = self._ensure_shadow(store, chapter)
+        self._validate_task(chapter_index, shadow, task)
         store.set_chapter_fields(
             chapter_index,
             status=STATUS_PENDING,
@@ -296,7 +341,11 @@ class TaskPipeline(DirectPipeline):
             phase, phase
         )
 
-    def _run_upstream(self, store: RunStore, chapter_index: int) -> None:
+    def _run_upstream_full(self, store: RunStore, chapter_index: int) -> None:
+        self._run_upstream_audit(store, chapter_index)
+        self._run_upstream_repair(store, chapter_index)
+
+    def _run_upstream_audit(self, store: RunStore, chapter_index: int) -> None:
         while True:
             chapter = store.load_chapter(chapter_index)
             shadow = self._ensure_shadow(store, chapter)
@@ -308,9 +357,20 @@ class TaskPipeline(DirectPipeline):
                 state = shadow.get("factual_state", {})
                 if not isinstance(state, dict) or state.get("audit_complete") is not True:
                     self._run_task_locked(store, chapter_index, "factual-audit")
-                self._run_task_locked(store, chapter_index, "factual-repair")
-                continue
+                return
             return
+
+    def _run_upstream_repair(self, store: RunStore, chapter_index: int) -> None:
+        chapter = store.load_chapter(chapter_index)
+        shadow = self._ensure_shadow(store, chapter)
+        if str(shadow.get("phase")) != "factual_audit":
+            return
+        state = shadow.get("factual_state", {})
+        if not isinstance(state, dict) or state.get("audit_complete") is not True:
+            raise StageTaskError(
+                f"chapter {chapter_index} factual audit did not complete before repair"
+            )
+        self._run_task_locked(store, chapter_index, "factual-repair")
 
     def _run_downstream(self, store: RunStore, chapter_index: int) -> None:
         while True:
@@ -435,36 +495,14 @@ class TaskPipeline(DirectPipeline):
                 },
             )
             self._save_shadow(store, chapter.index, shadow)
-        approved = self._process_term_revisions(
-            store, chapter, shadow, state, audit_batches
-        )
-        targets = self._targets(shadow)
-        if approved:
-            issues = [
-                issue
-                for issue in issues
-                if not self._issue_covered_by_revision(chapter, issue, approved)
-            ]
-        issues.extend(
-            self._terminology_issues(
-                chapter,
-                targets,
-                tuple(segment.index for segment in chapter.text_segments),
-            )
-        )
         state = shadow.setdefault("factual_state", state)
-        if not isinstance(state.get("repair_regions"), list):
-            state["repair_regions"] = [
-                {
-                    "id": f"factual-r{index}",
-                    "start": region.start,
-                    "end": region.end,
-                    "issues": list(region.issues),
-                }
-                for index, region in enumerate(
-                    self.repair_planner.plan(issues, len(chapter.segments))
-                )
-            ]
+        state["issue_count"] = len(issues)
+        state["term_revision_count"] = sum(
+            len(batch.get("term_revisions", []))
+            for batch in audit_batches.values()
+            if isinstance(batch, dict)
+        )
+        state.pop("repair_regions", None)
         state["audit_complete"] = True
         self._save_shadow(store, chapter.index, shadow)
 
