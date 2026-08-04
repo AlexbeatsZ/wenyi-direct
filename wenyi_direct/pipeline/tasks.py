@@ -260,6 +260,7 @@ class TaskPipeline(DirectPipeline):
         chapter = store.load_chapter(chapter_index)
         shadow = self._ensure_shadow(store, chapter)
         self._validate_task(chapter_index, shadow, task)
+        self._validate_task(chapter_index, shadow, task)
         store.set_chapter_fields(
             chapter_index,
             status=STATUS_PENDING,
