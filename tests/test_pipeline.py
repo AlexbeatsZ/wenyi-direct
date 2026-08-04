@@ -1,255 +1,53 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
 
-import pytest
-from typer.testing import CliRunner
-
-from wenyi_direct.assemble.writer import assemble
-from wenyi_direct.cli import app
-from wenyi_direct.config import Config
-from wenyi_direct.ingest.models import Chapter, Segment
-from wenyi_direct.llm.providers.fake import FakeClient
-from wenyi_direct.pipeline.direct import AlignmentError, DirectPipeline, export_json
-from wenyi_direct.pipeline.types import segment_id
 from wenyi_direct.prompts import (
-    CHINESE_FINDING_VALIDATION_SYSTEM,
-    CHINESE_READER_SYSTEM,
     FACTUAL_AUDIT_SYSTEM,
     FIDELITY_SYSTEM,
-    REPAIR_SYSTEM,
     TRANSLATION_SYSTEM,
-    chinese_reader_messages,
-    translation_messages,
 )
-from wenyi_direct.validate import validate_epub
+
+_CORE_PATH = Path(__file__).with_name("pipeline_core_cases.py")
+_SPEC = importlib.util.spec_from_file_location("wenyi_pipeline_core_cases", _CORE_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+_CORE = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _CORE
+_SPEC.loader.exec_module(_CORE)
+
+# Legacy pipeline tests predate the optional post-language-repair Chinese recheck.
+# Keep their original scope stable; dedicated tests/test_language_recheck.py covers
+# the new default behaviour.
+_ORIGINAL_CONFIG = _CORE._config
 
 
-def _payload(messages):
-    return json.loads(messages[-1]["content"].split("\n", 1)[1])
+def _legacy_config(tmp_path):
+    config = _ORIGINAL_CONFIG(tmp_path)
+    config.pipeline.max_language_rechecks = 0
+    return config
 
 
-def _config(tmp_path: Path) -> Config:
-    return Config.model_validate(
-        {
-            "source_lang": "ja",
-            "target_lang": "zh-CN",
-            "state_dir": str(tmp_path / "state"),
-            "output_dir": str(tmp_path / "outputs"),
-            "providers": {"default": {"provider": "fake"}},
-            "roles": {
-                "translate": "default",
-                "factual_audit": "default",
-                "chinese_audit": "default",
-                "repair": "default",
-                "validation": "default",
-            },
-            "window": {
-                "max_read_chars": 10000,
-                "max_write_chars": 10000,
-                "source_halo_chars": 1000,
-            },
-            "pipeline": {"repair_context_segments": 0},
-        }
-    )
+_CORE._config = _legacy_config
 
-
-def _write_book(path: Path) -> None:
-    path.write_text(
-        json.dumps(
-            {
-                "title": "夜の章",
-                "chapters": [
-                    {
-                        "title": "第0章",
-                        "segments": [
-                            {"source": "彼が来た。"},
-                            {"source": "光った。"},
-                            {"source": "ノエルの呟きは轟音に消えた。"},
-                        ],
-                    },
-                    {
-                        "title": "未来章",
-                        "segments": [{"source": "未来の秘密。"}],
-                    },
-                ],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-
-def test_chinese_reader_has_translation_acceptance_motive_but_no_source() -> None:
-    chapter = Chapter(
-        index=0,
-        title="原文章名",
-        segments=[Segment(index=0, source="光った。", target="闪光了。")],
-    )
-    messages = chinese_reader_messages(chapter, {0: "闪光了。"})
-    serialized = json.dumps(messages, ensure_ascii=False)
-
-    assert "机器翻译文稿上线前的中文阅读验收" in messages[0]["content"]
-    assert "短句或低语" in messages[0]["content"]
-    assert "闪光了。" in serialized
-    assert "光った。" not in serialized
-    assert "原文章名" not in serialized
-
-
-def test_japanese_translation_guardrails_are_general_not_case_specific() -> None:
-    for principle in (
-        "省略的主语",
-        "话语功能",
-        "连体修饰顺序",
-        "不成立搭配",
-        "不得为了自然或文采擅自扩大",
-    ):
-        assert principle in TRANSLATION_SYSTEM
-    for case_specific_answer in ("光った", "闪光了", "亮了", "第一具猎物"):
-        assert case_specific_answer not in TRANSLATION_SYSTEM
-    assert "不得仅因候选未采用 preferred" in FIDELITY_SYSTEM
-    assert "逐一检查每个 changed=true" in FIDELITY_SYSTEM
-    assert "条目数、ID 集合和顺序" in TRANSLATION_SYSTEM
-    assert "词典义直拼" in FACTUAL_AUDIT_SYSTEM
-
-
-def test_model_prompt_projection_excludes_renderer_metadata() -> None:
-    chapter = Chapter(
-        index=0,
-        title="章",
-        segments=[
-            Segment(
-                index=0,
-                source="続く。",
-                cont=True,
-                meta={"epub_inline": {"nodes": ["renderer-only-secret"]}},
-            )
-        ],
-    )
-    messages = translation_messages(chapter, (0,), (0,), {})
-    payload = _payload(messages)
-    assert payload["segments"][0]["continuation"] is True
-    assert "renderer-only-secret" not in json.dumps(messages, ensure_ascii=False)
-
-
-def _handler(messages, _tier, _json_mode):
-    system = messages[0]["content"]
-    payload = _payload(messages)
-    if system == TRANSLATION_SYSTEM:
-        source_by_id = {row["id"]: row["source"] for row in payload["segments"]}
-        initial = {
-            "彼が来た。": "他到来了。",
-            "光った。": "闪光了。",
-            "ノエルの呟きは轟音に消えた。": "诺艾尔的低语消失在轰鸣中。",
-            "未来の秘密。": "未来的秘密。",
-        }
-        return json.dumps(
-            {
-                "translations": [
-                    {"id": item["id"], "target": initial[source_by_id[item["id"]]]}
-                    for item in payload["required_output"]["translations"]
-                ]
-            },
-            ensure_ascii=False,
-        )
-    if system == FACTUAL_AUDIT_SYSTEM:
-        row = next((row for row in payload["segments"] if row["source"] == "光った。"), None)
-        noel = next((row for row in payload["segments"] if "ノエル" in row["source"]), None)
-        issues = []
-        if row is not None and row["audit"]:
-            issues.append(
-                {
-                    "start_id": row["id"],
-                    "end_id": row["id"],
-                    "cause_start_id": row["id"],
-                    "cause_end_id": row["id"],
-                    "type": "mistranslation",
-                    "detail": "中文搭配不成立",
-                    "required_meaning": "人物低声指出某处亮了",
-                }
-            )
-        candidates = [{"source": "ノエル", "target": "诺艾尔"}] if noel is not None else []
-        return json.dumps({"issues": issues, "term_candidates": candidates}, ensure_ascii=False)
-    if system == CHINESE_READER_SYSTEM:
-        row = next((row for row in payload["text"] if row["text"] == "他到来了。"), None)
-        noel = next(
-            (
-                row
-                for row in payload["text"]
-                if row["text"] == "诺艾尔的低语消失在轰鸣中。"
-            ),
-            None,
-        )
-        issues = []
-        if row is not None and row["audit"]:
-            issues.append(
-                {
-                    "start_id": row["id"],
-                    "end_id": row["id"],
-                    "type": "unnatural",
-                    "detail": "人物动作叙述过度书面",
-                    "evidence": "他到来了",
-                }
-            )
-        if noel is not None and noel["audit"]:
-            issues.append(
-                {
-                    "start_id": noel["id"],
-                    "end_id": noel["id"],
-                    "type": "unnatural",
-                    "detail": "消失在轰鸣中搭配生硬",
-                    "evidence": "低语消失在轰鸣中",
-                }
-            )
-        return json.dumps({"issues": issues}, ensure_ascii=False)
-    if system == CHINESE_FINDING_VALIDATION_SYSTEM:
-        issues = payload["reader_issues"]
-        return json.dumps(
-            {
-                "results": [
-                    {
-                        "finding_id": issue["finding_id"],
-                        "safe_to_repair": True,
-                        "repair_start_id": issue["start_id"],
-                        "repair_end_id": issue["end_id"],
-                        "required_meaning": "他来了",
-                        "constraints": ["保持过去时事件"],
-                        "reason": "可在不改变事实的前提下口语化",
-                    }
-                    for issue in issues
-                ]
-            },
-            ensure_ascii=False,
-        )
-    if system == REPAIR_SYSTEM:
-        issue_type = payload["issues"][0]["type"]
-        translations = []
-        for item in payload["required_output"]["translations"]:
-            row = next(row for row in payload["segments"] if row["id"] == item["id"])
-            target = row["current_target"]
-            if issue_type == "mistranslation":
-                target = "亮了。"
-            elif issue_type == "unnatural":
-                target = (
-                    "他来了。"
-                    if row["source"] == "彼が来た。"
-                    else "诺艾尔的低语被轰鸣声淹没了。"
-                )
-            translations.append({"id": item["id"], "target": target})
-        return json.dumps({"translations": translations}, ensure_ascii=False)
-    if system == FIDELITY_SYSTEM:
-        return json.dumps({"valid": True, "issues": []}, ensure_ascii=False)
-    raise AssertionError(f"unexpected prompt: {system}")
+_REWRITTEN = {
+    "test_full_pipeline_and_chinese_audit_information_boundary",
+    "test_japanese_translation_guardrails_are_general_not_case_specific",
+}
+for _name in dir(_CORE):
+    if _name.startswith("test_") and _name not in _REWRITTEN:
+        globals()[_name] = getattr(_CORE, _name)
 
 
 def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) -> None:
     source = tmp_path / "book.json"
-    _write_book(source)
-    config = _config(tmp_path)
-    fake = FakeClient(_handler)
+    _CORE._write_book(source)
+    config = _CORE._config(tmp_path)
+    fake = _CORE.FakeClient(_CORE._handler)
     clients = {role: fake for role in config.roles.model_dump()}
-    pipeline = DirectPipeline(config, clients, config_dir=tmp_path)
+    pipeline = _CORE.DirectPipeline(config, clients, config_dir=tmp_path)
 
     store = pipeline.run(source, chapters={0})
     chapter = store.load_chapter(0)
@@ -270,7 +68,9 @@ def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) ->
     assert (Path(store.run_dir) / "terminology.yaml").exists()
 
     chinese_calls = [
-        call for call in fake.calls if call["messages"][0]["content"] == CHINESE_READER_SYSTEM
+        call
+        for call in fake.calls
+        if call["messages"][0]["content"] == _CORE.CHINESE_READER_SYSTEM
     ]
     assert len(chinese_calls) == 1
     serialized = json.dumps(chinese_calls[0]["messages"], ensure_ascii=False)
@@ -282,16 +82,20 @@ def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) ->
     language_repair_calls = [
         call
         for call in fake.calls
-        if call["messages"][0]["content"] == REPAIR_SYSTEM
-        and _payload(call["messages"])["issues"][0]["type"] == "unnatural"
+        if call["messages"][0]["content"] == _CORE.REPAIR_SYSTEM
+        and _CORE._payload(call["messages"])["issues"][0]["type"] == "unnatural"
     ]
-    assert len(language_repair_calls) == 1
-    language_payload = _payload(language_repair_calls[0]["messages"])
-    assert len(language_payload["required_output"]["translations"]) == 2
+    assert len(language_repair_calls) == 2
+    assert sorted(
+        len(_CORE._payload(call["messages"])["required_output"]["translations"])
+        for call in language_repair_calls
+    ) == [1, 1]
 
     calls_before_second_chapter = len(fake.calls)
     pipeline.run(source, chapters={1})
-    second_chapter_calls = json.dumps(fake.calls[calls_before_second_chapter:], ensure_ascii=False)
+    second_chapter_calls = json.dumps(
+        fake.calls[calls_before_second_chapter:], ensure_ascii=False
+    )
     assert "未来の秘密。" in second_chapter_calls
     assert "彼が来た。" in second_chapter_calls
     assert "他来了。" in second_chapter_calls
@@ -303,217 +107,24 @@ def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) ->
     assert "formal_promotion" in artifact
 
     epub_path = tmp_path / "book.zh.epub"
-    assemble(store, str(source), str(epub_path), out_format="epub")
-    assert validate_epub(epub_path)["ok"] is True
+    _CORE.assemble(store, str(source), str(epub_path), out_format="epub")
+    assert _CORE.validate_epub(epub_path)["ok"] is True
 
 
-def test_failed_repair_never_changes_formal_chapter(tmp_path: Path) -> None:
-    source = tmp_path / "book.json"
-    _write_book(source)
-    config = _config(tmp_path)
-    config.pipeline.max_repair_attempts = 1
-
-    def rejecting(messages, tier, json_mode):
-        if messages[0]["content"] == FIDELITY_SYSTEM:
-            return json.dumps({"valid": False, "issues": [{"detail": "still wrong"}]})
-        return _handler(messages, tier, json_mode)
-
-    fake = FakeClient(rejecting)
-    pipeline = DirectPipeline(
-        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
-    )
-    with pytest.raises(RuntimeError, match="failed source-fidelity validation"):
-        pipeline.run(source, chapters={0})
-    formal = pipeline.store_for(source).load_chapter(0)
-    assert all(segment.target is None for segment in formal.text_segments)
-    shadow = pipeline.store_for(source).load_shadow(0)
-    assert shadow is not None
-    assert shadow["targets"]["1"] == "闪光了。"
-    usage = json.loads(Path(pipeline.store_for(source).usage_path).read_text(encoding="utf-8"))
-    assert usage["providers"]
-
-
-def test_chinese_stage_resume_reuses_reader_and_validation_checkpoints(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "book.json"
-    _write_book(source)
-    config = _config(tmp_path)
-    config.pipeline.max_repair_attempts = 1
-    reject_language_once = True
-
-    def unstable(messages, tier, json_mode):
-        nonlocal reject_language_once
-        if messages[0]["content"] == FIDELITY_SYSTEM:
-            payload = _payload(messages)
-            if reject_language_once and any(
-                row.get("changed") and row.get("candidate_target") == "他来了。"
-                for row in payload["segments"]
-            ):
-                reject_language_once = False
-                return json.dumps(
-                    {"valid": False, "issues": [{"detail": "retry language batch"}]}
-                )
-        return _handler(messages, tier, json_mode)
-
-    fake = FakeClient(unstable)
-    pipeline = DirectPipeline(
-        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
-    )
-    with pytest.raises(RuntimeError, match="language_repair failed"):
-        pipeline.run(source, chapters={0})
-
-    reader_calls = sum(
-        call["messages"][0]["content"] == CHINESE_READER_SYSTEM for call in fake.calls
-    )
-    validation_calls = sum(
-        call["messages"][0]["content"] == CHINESE_FINDING_VALIDATION_SYSTEM
-        for call in fake.calls
-    )
-    pipeline.run(source, chapters={0})
-    assert sum(
-        call["messages"][0]["content"] == CHINESE_READER_SYSTEM for call in fake.calls
-    ) == reader_calls
-    assert sum(
-        call["messages"][0]["content"] == CHINESE_FINDING_VALIDATION_SYSTEM
-        for call in fake.calls
-    ) == validation_calls
-    assert pipeline.store_for(source).load_manifest()["chapters"][0]["status"] == "done"
-
-
-def test_audit_id_digest_copy_error_is_recovered_but_unknown_segment_is_rejected(
-    tmp_path: Path,
-) -> None:
-    config = _config(tmp_path)
-    pipeline = DirectPipeline(config, {}, config_dir=tmp_path)
-    chapter = Chapter(
-        index=3,
-        title="章",
-        segments=[Segment(index=0, source="光った。", target="亮了。")],
-    )
-    response = {
-        "issues": [
-            {
-                "start_id": "ch3:s0:wrongdigest",
-                "end_id": "ch3:s0:wrongdigest",
-                "type": "other",
-                "detail": "test",
-            }
-        ]
-    }
-    parsed = pipeline._parse_issues(chapter, response, {0}, {0})
-    assert parsed[0]["start"] == 0
-
-    response["issues"][0]["start_id"] = "ch3:s0"
-    parsed = pipeline._parse_issues(chapter, response, {0}, {0})
-    assert parsed[0]["start"] == 0
-
-    response["issues"][0]["start_id"] = "ch3:s99:wrongdigest"
-    with pytest.raises(AlignmentError, match="unknown stable ID"):
-        pipeline._parse_issues(chapter, response, {0}, {0})
-
-
-def test_audit_and_reader_validation_cannot_escape_visible_scope(tmp_path: Path) -> None:
-    pipeline = DirectPipeline(_config(tmp_path), {}, config_dir=tmp_path)
-    chapter = Chapter(
-        index=0,
-        title="章",
-        segments=[Segment(index=index, source=f"source-{index}") for index in range(8)],
-    )
-    response = {
-        "issues": [
-            {
-                "start_id": "ch0:s2",
-                "end_id": "ch0:s7",
-                "type": "other",
-                "detail": "range typo",
-            }
-        ]
-    }
-    with pytest.raises(AlignmentError, match="outside the visible read scope"):
-        pipeline._parse_issues(chapter, response, {2}, {1, 2, 3})
-
-    original = [{"finding_id": "f0", "start": 2, "end": 2, "detail": "x"}]
-    validation = {
-        "results": [
-            {
-                "finding_id": "f0",
-                "safe_to_repair": True,
-                "repair_start_id": "ch0:s0",
-                "repair_end_id": "ch0:s7",
-                "required_meaning": "x",
-            }
-        ]
-    }
-    with pytest.raises(AlignmentError, match="outside the visible read scope"):
-        pipeline._parse_reader_validations(chapter, validation, original, {1, 2, 3})
-
-
-def test_synthetic_speaker_metadata_never_enters_target(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    pipeline = DirectPipeline(config, {}, config_dir=tmp_path)
-    chapter = Chapter(
-        index=0,
-        title="章",
-        segments=[
-            Segment(
-                index=0,
-                source="【話者：黒澤／中文名：黑泽】「待て」",
-            )
-        ],
-    )
-    stable_id = next(iter({
-        segment_id(0, segment): segment.index for segment in chapter.text_segments
-    }))
-    parsed = pipeline._parse_translations(
-        chapter,
-        (0,),
-        {
-            "translations": [
-                {
-                    "id": stable_id,
-                    "target": "【話者：黒澤／中文名：黑泽】「等等」",
-                }
-            ]
-        },
-    )
-    assert parsed == {0: "「等等」"}
-
-
-def test_cli_prepare_and_status_need_no_model_credentials(tmp_path: Path) -> None:
-    source = tmp_path / "book.json"
-    _write_book(source)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """providers:\n  default:\n    provider: fake\npaths:\n  state_dir: state\n""",
-        encoding="utf-8",
-    )
-    runner = CliRunner()
-    prepared = runner.invoke(app, ["prepare", str(source), "--config", str(config_path)])
-    assert prepared.exit_code == 0, prepared.output
-    status = runner.invoke(app, ["status", str(source), "--config", str(config_path)])
-    assert status.exit_code == 0, status.output
-    assert "0/2 formal chapters complete" in status.output
-
-
-def test_low_level_exports_reject_incomplete_formal_state(tmp_path: Path) -> None:
-    source = tmp_path / "book.json"
-    _write_book(source)
-    pipeline = DirectPipeline(_config(tmp_path), {}, config_dir=tmp_path)
-    store = pipeline.prepare(source)
-
-    with pytest.raises(RuntimeError, match="formal translation is incomplete"):
-        export_json(store, tmp_path / "incomplete.json")
-    with pytest.raises(RuntimeError, match="formal translation is incomplete"):
-        assemble(store, str(source), str(tmp_path / "incomplete.epub"))
-
-
-def test_resume_rejects_changed_source_file(tmp_path: Path) -> None:
-    source = tmp_path / "book.json"
-    _write_book(source)
-    config = _config(tmp_path)
-    pipeline = DirectPipeline(config, {}, config_dir=tmp_path)
-    pipeline.prepare(source)
-    source.write_text(source.read_text(encoding="utf-8") + "\n", encoding="utf-8")
-    with pytest.raises(RuntimeError, match="source file changed"):
-        pipeline.prepare(source)
+def test_japanese_translation_guardrails_are_general_not_case_specific() -> None:
+    for principle in (
+        "省略的主语",
+        "话语功能",
+        "连体修饰顺序",
+        "不成立搭配",
+        "不得为了自然或文采擅自扩大",
+    ):
+        assert principle in TRANSLATION_SYSTEM
+    for case_specific_answer in ("光った", "闪光了", "亮了", "第一具猎物"):
+        assert case_specific_answer not in TRANSLATION_SYSTEM
+    assert "current_terminology" in FIDELITY_SYSTEM
+    assert "preferred 更不能作为质量门" in FIDELITY_SYSTEM
+    assert "逐一检查每个 changed=true" in FIDELITY_SYSTEM
+    assert "条目数、ID 集合和顺序" in TRANSLATION_SYSTEM
+    assert "词典义直拼" in FACTUAL_AUDIT_SYSTEM
+    assert "entire_existing_rule" in FACTUAL_AUDIT_SYSTEM

@@ -234,7 +234,9 @@ class AgyClient(LLMClient):
                             )
                             stdout = _strip_ansi(result.stdout or "")
                             stderr = _strip_ansi(result.stderr or "")
-                            detail = stderr or stdout or "无错误输出"
+                            detail = "\n".join(
+                                part for part in (stderr, stdout) if part
+                            ) or "无错误输出"
                             if result.returncode == 0:
                                 if _is_content_policy_rejection(detail):
                                     if response_attempt + 1 < _TEXT_RESPONSE_ATTEMPTS:
@@ -248,6 +250,13 @@ class AgyClient(LLMClient):
                                     raise RuntimeError(
                                         "agy CLI 连续把纯文本任务误判为工具调用；"
                                         "已拒绝授权并停止"
+                                    )
+                                if not stdout:
+                                    if response_attempt + 1 < _TEXT_RESPONSE_ATTEMPTS:
+                                        continue
+                                    raise RuntimeError(
+                                        "agy CLI 成功退出，但没有返回模型正文："
+                                        f"{stderr or '无诊断信息'}"
                                     )
                                 self._resolved_models[model_key] = candidate
                                 completed = True
@@ -281,7 +290,7 @@ class AgyClient(LLMClient):
         if result.returncode != 0:
             raise RuntimeError(f"agy CLI 退出码 {result.returncode}：{detail}")
 
-        text = stdout or stderr
+        text = stdout
         self.usage.record(
             tier,
             UsageSample(

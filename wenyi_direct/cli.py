@@ -14,6 +14,11 @@ from .llm.factory import build_clients
 from .pipeline.direct import DirectPipeline, export_json
 from .pipeline.knowledge import TerminologyStore, TermRule
 from .pipeline.runstore import STATUS_DONE, RunStore, slugify
+from .pipeline.term_migration import (
+    TermMigrationNeedsReview,
+    TermMigrationService,
+    TermRevision,
+)
 from .validate import validate_epub
 
 app = typer.Typer(no_args_is_help=True, help="Chapter-first literary translation.")
@@ -75,12 +80,27 @@ def translate(
     chapters: str | None = typer.Option(
         None, help="Optional indexes/ranges, e.g. 0,2-4. Default resumes all pending chapters."
     ),
+    restart_from: str | None = typer.Option(
+        None,
+        "--restart-from",
+        help=(
+            "Explicitly discard later Shadow work and restart selected chapters from "
+            "translate, factual-audit, or chinese-audit."
+        ),
+    ),
 ) -> None:
-    """Resume direct translation and all configured quality gates."""
+    """Resume translation, or explicitly restart selected stages when requested."""
     cfg = _load(config)
     clients = build_clients(cfg)
     pipeline = DirectPipeline(cfg, clients, config_dir=config.resolve().parent)
-    store = pipeline.run(source, chapters=_parse_chapters(chapters))
+    try:
+        store = pipeline.run(
+            source,
+            chapters=_parse_chapters(chapters),
+            restart_from=restart_from,
+        )
+    except ValueError as error:
+        raise typer.BadParameter(str(error), param_hint="--restart-from") from error
     _print_status(store)
 
 
@@ -259,6 +279,89 @@ def set_term_status(
     store = TerminologyStore.load(_terms_path(cfg, config))
     changed = store.set_status(source, status, target=target)
     console.print(f"Updated {changed} rule(s)")
+
+
+@terms_app.command("revise")
+def revise_term(
+    book: Path = typer.Argument(..., exists=True, dir_okay=False),
+    source_term: str = typer.Option(..., "--source", help="Source-side term to revise."),
+    old_target: str = typer.Option(..., "--old-target"),
+    new_target: str = typer.Option(..., "--new-target"),
+    valid_from: int | None = typer.Option(None, min=0),
+    valid_to: int | None = typer.Option(None, min=0),
+    reason: str = typer.Option("", help="Reason recorded with the migration plan."),
+    no_model: bool = typer.Option(
+        False,
+        "--no-model",
+        help="Do not resolve ambiguous existing wording with repair/fidelity model calls.",
+    ),
+    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True),
+) -> None:
+    """Immediately migrate a confirmed whole-rule terminology revision."""
+    cfg = _load(config)
+    store = _store(cfg, config, book)
+    if not store.exists():
+        raise typer.BadParameter("no state exists for this source; run prepare or translate")
+    terminology_path = Path(store.run_dir) / "terminology.yaml"
+    if not terminology_path.is_file():
+        raise typer.BadParameter("the book-local terminology snapshot does not exist")
+    terminology = TerminologyStore.load(terminology_path)
+    revision = TermRevision(
+        source=source_term,
+        old_target=old_target,
+        new_target=new_target,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        reason=reason,
+    )
+    try:
+        with store.lock():
+            service = TermMigrationService(store, terminology)
+            plan = service.plan(revision)
+            resolver = None
+            if plan.ambiguous_uses and not no_model:
+                clients = build_clients(cfg)
+                pipeline = DirectPipeline(
+                    cfg,
+                    clients,
+                    config_dir=config.resolve().parent,
+                )
+                pipeline._activate_terminology_for(store)
+                def resolver(use, accepted):
+                    return pipeline._resolve_term_migration_use(
+                                    store, use, accepted
+                                )
+            result = service.apply(plan, resolver=resolver)
+    except TermMigrationNeedsReview as error:
+        table = Table(title=f"Ambiguous terminology uses: {error.plan.migration_id}")
+        table.add_column("Chapter", justify="right")
+        table.add_column("Segment", justify="right")
+        table.add_column("Storage")
+        table.add_column("Current target")
+        table.add_column("Source/old/new counts")
+        for use in error.plan.ambiguous_uses:
+            table.add_row(
+                str(use.chapter),
+                str(use.segment),
+                use.storage,
+                use.current_target,
+                f"{use.source_count}/{use.old_target_count}/{use.new_target_count}",
+            )
+        console.print(table)
+        console.print(
+            "No text or terminology rule was changed. The migration plan was saved under "
+            f"{Path(store.run_dir) / 'term_migrations'}."
+        )
+        raise typer.Exit(code=2) from error
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    console.print(
+        f"Migrated {result.replacement_rule.source}: "
+        f"{old_target} -> {result.replacement_rule.target}; "
+        f"edits={result.applied_edits}, model_resolved={result.model_resolved_edits}, "
+        f"invalidated_snapshots="
+        f"{sum(len(items) for items in result.invalidated_snapshots.values())}"
+    )
 
 
 @terms_app.command("group-add")
