@@ -350,60 +350,97 @@ class DirectPipeline:
         self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
     ) -> None:
         targets = self._targets(shadow)
-        reader_batches: list[tuple[TranslationWindow, list[dict]]] = []
-        for window in self.window_planner.plan(chapter):
-            messages = chinese_reader_messages(
-                chapter, targets, window.read_indexes, window.write_indexes
+        state = shadow.setdefault("chinese_state", {})
+        stored_reader = state.get("reader_batches")
+        if not isinstance(stored_reader, list):
+            stored_reader = []
+            for window in self.window_planner.plan(chapter):
+                messages = chinese_reader_messages(
+                    chapter, targets, window.read_indexes, window.write_indexes
+                )
+                input_ref = store.save_translation_input(
+                    {"stage": "chinese_reader_audit", "messages": messages}
+                )
+                response = self.clients["chinese_audit"].complete_json(
+                    messages,
+                    tier=self.config.pipeline.audit_tier,
+                    stage="chinese_reader_audit",
+                )
+                parsed = self._parse_issues(
+                    chapter, response, set(window.write_indexes)
+                )
+                stored_reader.append(
+                    {
+                        "read_indexes": list(window.read_indexes),
+                        "write_indexes": list(window.write_indexes),
+                        "issues": parsed,
+                    }
+                )
+                store.record_audit(
+                    chapter.index,
+                    "chinese_reader_audit",
+                    {"input_ref": input_ref, "issues": parsed},
+                )
+                state["reader_batches"] = stored_reader
+                store.save_shadow(chapter.index, shadow)
+        reader_batches = [
+            (
+                TranslationWindow(
+                    tuple(item["read_indexes"]), tuple(item["write_indexes"])
+                ),
+                list(item["issues"]),
             )
-            input_ref = store.save_translation_input(
-                {"stage": "chinese_reader_audit", "messages": messages}
-            )
-            response = self.clients["chinese_audit"].complete_json(
-                messages,
-                tier=self.config.pipeline.audit_tier,
-                stage="chinese_reader_audit",
-            )
-            parsed = self._parse_issues(chapter, response, set(window.write_indexes))
-            reader_batches.append((window, parsed))
-            store.record_audit(
-                chapter.index,
-                "chinese_reader_audit",
-                {"input_ref": input_ref, "issues": parsed},
-            )
+            for item in stored_reader
+        ]
 
-        accepted_batches: list[tuple[TranslationWindow, list[dict]]] = []
-        for window, batch in reader_batches:
+        stored_validations = state.setdefault("validation_batches", {})
+        accepted_batches: list[tuple[int, TranslationWindow, list[dict]]] = []
+        for batch_index, (window, batch) in enumerate(reader_batches):
             if not batch:
                 continue
             tagged = [
                 {**issue, "finding_id": f"f{index}"}
                 for index, issue in enumerate(batch)
             ]
-            messages = chinese_finding_validation_messages(
-                chapter, targets, tagged, window.read_indexes
-            )
-            input_ref = store.save_translation_input(
-                {"stage": "chinese_finding_validation", "messages": messages}
-            )
-            response = self.clients["validation"].complete_json(
-                messages,
-                tier=self.config.pipeline.validation_tier,
-                stage="chinese_finding_validation",
-            )
-            results = self._parse_reader_validations(chapter, response, tagged)
-            batch_accepted: list[dict] = []
-            for issue, result in zip(tagged, results, strict=True):
-                store.record_audit(
-                    chapter.index,
-                    "chinese_finding_validation",
-                    {"input_ref": input_ref, "reader_issue": issue, "result": result},
+            key = str(batch_index)
+            if key in stored_validations:
+                results = list(stored_validations[key])
+            else:
+                messages = chinese_finding_validation_messages(
+                    chapter, targets, tagged, window.read_indexes
                 )
+                input_ref = store.save_translation_input(
+                    {"stage": "chinese_finding_validation", "messages": messages}
+                )
+                response = self.clients["validation"].complete_json(
+                    messages,
+                    tier=self.config.pipeline.validation_tier,
+                    stage="chinese_finding_validation",
+                )
+                results = self._parse_reader_validations(chapter, response, tagged)
+                for issue, result in zip(tagged, results, strict=True):
+                    store.record_audit(
+                        chapter.index,
+                        "chinese_finding_validation",
+                        {
+                            "input_ref": input_ref,
+                            "reader_issue": issue,
+                            "result": result,
+                        },
+                    )
+                stored_validations[key] = results
+                store.save_shadow(chapter.index, shadow)
+            batch_accepted: list[dict] = []
+            for result in results:
                 if result["safe_to_repair"]:
                     batch_accepted.append(result)
             if batch_accepted:
-                accepted_batches.append((window, batch_accepted))
+                accepted_batches.append((batch_index, window, batch_accepted))
 
-        for window, batch in accepted_batches:
+        completed_repairs = set(state.setdefault("completed_repair_batches", []))
+        for batch_index, window, batch in accepted_batches:
+            if batch_index in completed_repairs:
+                continue
             regions = self.repair_planner.plan(batch, len(chapter.segments))
             write_indexes = tuple(
                 sorted({index for region in regions for index in region.indexes})
@@ -423,6 +460,8 @@ class DirectPipeline:
                 write_indexes=write_indexes,
             )
             self._save_targets(shadow, targets)
+            completed_repairs.add(batch_index)
+            state["completed_repair_batches"] = sorted(completed_repairs)
             store.save_shadow(chapter.index, shadow)
         shadow["phase"] = "promote"
         store.save_shadow(chapter.index, shadow)

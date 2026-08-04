@@ -308,6 +308,54 @@ def test_failed_repair_never_changes_formal_chapter(tmp_path: Path) -> None:
     assert usage["providers"]
 
 
+def test_chinese_stage_resume_reuses_reader_and_validation_checkpoints(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    config = _config(tmp_path)
+    config.pipeline.max_repair_attempts = 1
+    reject_language_once = True
+
+    def unstable(messages, tier, json_mode):
+        nonlocal reject_language_once
+        if messages[0]["content"] == FIDELITY_SYSTEM:
+            payload = _payload(messages)
+            if reject_language_once and any(
+                row.get("changed") and row.get("candidate_target") == "他来了。"
+                for row in payload["segments"]
+            ):
+                reject_language_once = False
+                return json.dumps(
+                    {"valid": False, "issues": [{"detail": "retry language batch"}]}
+                )
+        return _handler(messages, tier, json_mode)
+
+    fake = FakeClient(unstable)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+    with pytest.raises(RuntimeError, match="language_repair failed"):
+        pipeline.run(source, chapters={0})
+
+    reader_calls = sum(
+        call["messages"][0]["content"] == CHINESE_READER_SYSTEM for call in fake.calls
+    )
+    validation_calls = sum(
+        call["messages"][0]["content"] == CHINESE_FINDING_VALIDATION_SYSTEM
+        for call in fake.calls
+    )
+    pipeline.run(source, chapters={0})
+    assert sum(
+        call["messages"][0]["content"] == CHINESE_READER_SYSTEM for call in fake.calls
+    ) == reader_calls
+    assert sum(
+        call["messages"][0]["content"] == CHINESE_FINDING_VALIDATION_SYSTEM
+        for call in fake.calls
+    ) == validation_calls
+    assert pipeline.store_for(source).load_manifest()["chapters"][0]["status"] == "done"
+
+
 def test_audit_id_digest_copy_error_is_recovered_but_unknown_segment_is_rejected(
     tmp_path: Path,
 ) -> None:
