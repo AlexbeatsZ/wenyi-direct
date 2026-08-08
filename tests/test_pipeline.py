@@ -645,6 +645,48 @@ def test_formal_review_uses_existing_text_and_dual_lane_without_retranslation(
     assert len(fake.calls) == calls_after_review
 
 
+def test_formal_review_archives_unfinished_legacy_shadow_when_formal_exists(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    config = _config(tmp_path)
+    fake = FakeClient(_handler)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+    store = pipeline.run(source)
+    formal_targets = {
+        str(segment.index): segment.target or ""
+        for segment in store.load_chapter(0).segments
+    }
+    legacy_shadow = {
+        "schema": 1,
+        "chapter": 0,
+        "phase": "translate",
+        "source_digest": store.load_shadow(0)["source_digest"],
+        "targets": {"0": "discarded candidate"},
+        "translated_ids": ["ch0:s0"],
+    }
+    store.save_shadow(0, legacy_shadow)
+    fake.calls.clear()
+
+    pipeline.review_formal(source, chapters={0}, parallel=False)
+
+    stages = [call["stage"] for call in fake.calls]
+    assert "direct_translation" not in stages
+    assert "factual_audit" in stages
+    reviewed = store.load_chapter(0)
+    assert {
+        str(segment.index): segment.target or "" for segment in reviewed.segments
+    } == formal_targets
+    archives = list(Path(store.superseded_shadows_dir).glob("ch0.*.json"))
+    assert len(archives) == 1
+    archived = json.loads(archives[0].read_text(encoding="utf-8"))
+    assert archived["reason"] == "formal_review_superseded_legacy_shadow"
+    assert archived["shadow"] == legacy_shadow
+
+
 def test_parallel_pipeline_really_overlaps_and_defers_future_terms(tmp_path: Path) -> None:
     source = tmp_path / "parallel.json"
     source.write_text(

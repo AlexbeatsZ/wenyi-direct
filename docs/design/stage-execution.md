@@ -40,6 +40,12 @@ source text, kind, and anchor. A complete match backfills the digest once; any
 structural difference remains blocked as an explicit migration instead of silently
 attaching Formal text to a different source.
 
+When Formal text already exists, a pre-review Shadow from an older translation run
+is not a valid review checkpoint. Starting Formal review archives that Shadow
+verbatim under `artifacts/superseded_shadows/` before replacing it with a review
+Shadow based on the current Formal text. This preserves unfinished legacy work
+without allowing it to block or contaminate the review baseline.
+
 Audit and repair are separate checkpoints. Re-running an unfinished audit reuses
 completed windows and validations. Repair regions have stable persisted IDs, so a
 crash resumes after accepted regions instead of repeating them.

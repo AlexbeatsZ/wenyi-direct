@@ -422,9 +422,10 @@ class DirectPipeline:
             if row.get("status") == STATUS_DONE:
                 if marker and phase == "done" and not force:
                     continue
-                if shadow and phase not in {None, "done"}:
+                if marker and phase not in {None, "done"}:
                     raise StageTaskError(
-                        f"chapter {chapter_index} has an unfinished non-review Shadow"
+                        f"chapter {chapter_index} has an inconsistent unfinished "
+                        "Formal-review Shadow while its Formal status is done"
                     )
                 result.append(chapter_index)
                 continue
@@ -462,6 +463,21 @@ class DirectPipeline:
         if missing:
             raise AlignmentError(
                 f"cannot review Formal chapter with empty targets: {missing}"
+            )
+        if existing:
+            reason = (
+                "new_forced_formal_review"
+                if existing.get("formal_review")
+                else "formal_review_superseded_legacy_shadow"
+            )
+            archived_path = store.archive_shadow(chapter_index, reason=reason)
+            store.log_event(
+                "shadow_superseded_for_formal_review",
+                chapter=chapter_index,
+                previous_phase=existing.get("phase"),
+                previous_schema=existing.get("schema"),
+                archive_path=archived_path,
+                reason=reason,
             )
         baseline = json.dumps(targets, ensure_ascii=False, sort_keys=True).encode("utf-8")
         shadow = {

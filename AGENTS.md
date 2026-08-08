@@ -68,6 +68,8 @@ promotion to the final text.
 
 ## Durable Lessons
 
+- `[active | Formal review migration | verified 2026-08-09]` A completed Formal chapter can coexist with a schema-1 translation Shadow left by an earlier run. Formal review must archive such a Shadow under `artifacts/superseded_shadows/` and seed its new review Shadow from Formal; treating the legacy candidate as resumable review state blocks valid re-audits, while silently overwriting it loses forensic state.
+
 - Do not duplicate stage orchestration in a subclass or one CLI function per stage;
   the previous branch accumulated repeated validation calls and divergent behavior.
 - In staggered execution, defer chapter N+1 terminology activation until chapter N

@@ -197,6 +197,11 @@ class RunStore:
         """Return resumable candidate state, which is never used by assembly."""
         return os.path.join(self.run_dir, "shadows")
 
+    @property
+    def superseded_shadows_dir(self) -> str:
+        """Return immutable archives of Shadows replaced by another workflow."""
+        return os.path.join(self.artifacts_dir, "superseded_shadows")
+
     def shadow_path(self, chapter: int) -> str:
         return os.path.join(self.shadows_dir, f"ch{chapter}.json")
 
@@ -320,6 +325,28 @@ class RunStore:
     def load_shadow(self, chapter: int) -> dict[str, Any] | None:
         path = self.shadow_path(chapter)
         return self._read_json(path) if os.path.isfile(path) else None
+
+    def archive_shadow(self, chapter: int, *, reason: str) -> str | None:
+        """Preserve the current Shadow before intentionally replacing it."""
+        with self._thread_lock:
+            shadow = self.load_shadow(chapter)
+            if shadow is None:
+                return None
+            stamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f%z")
+            filename = f"ch{chapter}.{stamp}.{uuid.uuid4().hex}.json"
+            path = os.path.join(self.superseded_shadows_dir, filename)
+            self._write_json(
+                path,
+                {
+                    "schema": 1,
+                    "archived_at": datetime.now().astimezone().isoformat(
+                        timespec="microseconds"
+                    ),
+                    "reason": reason,
+                    "shadow": shadow,
+                },
+            )
+            return path
 
     def record_audit(self, chapter: int, stage: str, payload: dict[str, Any]) -> None:
         """Append an immutable audit request/result summary."""
