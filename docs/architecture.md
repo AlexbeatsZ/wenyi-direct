@@ -37,6 +37,12 @@ document parser
 Fresh calls provide task and information separation. They are not described as
 independent reviewers when the configured roles use the same model.
 
+Each arrow after parsing is also a persisted, independently executable stage. The
+ordinary runner and the granular CLI share the same dispatcher rather than keeping
+separate pipeline implementations. Across adjacent chapters, the downstream Chinese
+line for chapter N may overlap the translation/factual-audit line for N+1; per-chapter
+gate order remains unchanged. See [design/stage-execution.md](design/stage-execution.md).
+
 ## Read scope versus write scope
 
 A model call receives two explicit scopes:
@@ -81,6 +87,10 @@ contracts, and the current terminology snapshot. Resuming after one of those cha
 invalidates downstream review checkpoints while preserving already completed direct
 translation. Low-level JSON and document exporters independently reject incomplete
 Formal state; this is not only a CLI check.
+
+Factual-audit windows, factual repair regions, Chinese Reader batches, source-aware
+finding validations, and language repair regions are separately checkpointed. The
+manifest exposes the next granular `task` in addition to the broad phase.
 
 ## Terminology
 

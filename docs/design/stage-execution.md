@@ -1,0 +1,67 @@
+# Stage execution and two-lane scheduling
+
+## One state machine, two orchestration modes
+
+The persisted chapter state has six executable stages:
+
+| Stage | Requires | Stops after |
+|---|---|---|
+| `translate` | a pending chapter | complete direct Shadow text |
+| `factual-audit` | translated Shadow | checkpointed findings and term candidates |
+| `factual-repair` | complete factual audit | source-validated factual snapshot |
+| `chinese-audit` | factual snapshot | Chinese-only findings plus source validation |
+| `chinese-repair` | complete Chinese audit | source-validated language repairs |
+| `promote` | reviewed Shadow | atomic Formal replacement |
+
+`DirectPipeline.run_stage()` executes exactly one ready stage and refuses missing
+prerequisites. `DirectPipeline.run()` advances by repeatedly calling that same stage
+dispatcher. The CLI therefore needs only `stage <name>` for granular work and
+`translate` for composition; stage logic is not copied into command handlers.
+
+Audit and repair are separate checkpoints. Re-running an unfinished audit reuses
+completed windows and validations. Repair regions have stable persisted IDs, so a
+crash resumes after accepted regions instead of repeating them.
+
+## Two-lane parallel mode
+
+`translate --parallel` pipelines adjacent chapters with a one-chapter offset:
+
+```text
+warm up chapter N:  translate -> factual audit -> factual repair
+
+in parallel:
+  downstream N:    Chinese audit -> Chinese repair -> promote
+  upstream N+1:    translate -> factual audit
+
+join:               activate N+1 deferred term discoveries -> factual repair N+1
+```
+
+The overlap uses two worker threads and is tested with synchronization barriers; it
+is not merely alternating log messages. Discontiguous chapter selections form
+separate runs, so provisional context never jumps across an unselected gap.
+
+## Information boundaries during overlap
+
+Chapter N+1 may use only chapter N's completed factual snapshot as provisional past
+context. The payload marks this material with `provisional=true` and
+`factual_target`; an unreviewed direct draft is never exposed as past knowledge.
+Once N reaches Formal, ordinary `formal_target` context is used.
+
+Term candidates found in N+1 are checkpointed but not activated while N's downstream
+lane is running. They are activated only after both lanes join, before N+1 factual
+repair. This prevents a future chapter's discovery from entering N source validation
+or changing N's policy fingerprint.
+
+The Chinese Reader call itself remains unchanged: it receives reader-visible Chinese
+only, without source, terminology, analysis, or translation instructions.
+
+## Mutation and failure safety
+
+The existing per-book process lock covers the complete sequential or parallel run.
+Within a parallel process, manifest read-modify-write operations and shared JSONL or
+input-artifact writes use a re-entrant thread lock. Shadow and Formal files are still
+owned by one chapter lane at a time.
+
+A worker failure is propagated at the join. Completed windows, audit results, repair
+regions, and Shadow targets are already persisted, so the next invocation resumes
+through the same stage dispatcher. Formal text changes only in `promote`.

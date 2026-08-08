@@ -41,6 +41,31 @@ current book's state rather than the shared terminology seed file.
 Each stage may use a different transport, or all stages may share one model. API
 keys are named by `api_key_env` in YAML and supplied through environment variables.
 
+## Independent stages and parallel execution
+
+Every major stage can be executed independently. A stage stops at its declared
+boundary and refuses to invent missing prerequisites:
+
+```powershell
+uv run wenyi-direct stage translate path\to\book.epub --chapters 0-3 --config config.yaml
+uv run wenyi-direct stage factual-audit path\to\book.epub --chapters 0-3 --config config.yaml
+uv run wenyi-direct stage factual-repair path\to\book.epub --chapters 0-3 --config config.yaml
+uv run wenyi-direct stage chinese-audit path\to\book.epub --chapters 0-3 --config config.yaml
+uv run wenyi-direct stage chinese-repair path\to\book.epub --chapters 0-3 --config config.yaml
+uv run wenyi-direct stage promote path\to\book.epub --chapters 0-3 --config config.yaml
+```
+
+For normal end-to-end work, `translate --parallel` uses two real model lanes: chapter
+N completes Chinese review and promotion while chapter N+1 translates and performs
+factual audit. The next chapter sees only N's completed factual snapshot as
+provisional past context. Future-chapter terminology discoveries remain deferred
+until N is Formal.
+
+The single `stage <name>` command replaces the earlier standalone factual-only
+`audit` command and avoids six duplicated CLI handlers. See
+[docs/design/stage-execution.md](docs/design/stage-execution.md) for checkpoint,
+locking, and information-boundary details.
+
 ## Quick start
 
 ```powershell
@@ -48,6 +73,7 @@ uv sync
 uv run wenyi-direct init-config config.yaml
 # edit config.yaml and set the referenced API-key environment variable if needed
 uv run wenyi-direct translate path\to\book.epub --config config.yaml
+uv run wenyi-direct translate path\to\book.epub --parallel --config config.yaml
 uv run wenyi-direct status path\to\book.epub --config config.yaml
 uv run wenyi-direct monitor path\to\book.epub --config config.yaml
 uv run wenyi-direct assemble path\to\book.epub --config config.yaml --format epub

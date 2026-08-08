@@ -37,6 +37,12 @@ EVENT_LABELS = {
     "translation_window_completed": "直接翻译窗口完成",
     "chapter_promoted": "章节通过全部质量门",
     "chapter_failed": "章节处理失败",
+    "stage_started": "独立阶段开始",
+    "stage_completed": "独立阶段完成",
+    "stage_failed": "独立阶段失败",
+    "parallel_pair_started": "双线并行开始",
+    "parallel_pair_completed": "双线并行完成",
+    "deferred_terms_activated": "并行术语候选已安全激活",
     "control_metadata_cleanup": "说话者控制标签已清理",
     "factual_audit": "事实审查完成",
     "chinese_reader_audit": "纯中文阅读审查完成",
@@ -157,6 +163,7 @@ def _current_work(manifest: dict[str, Any], models: dict[str, dict[str, str]]) -
         active = next((c for c in chapters if c.get("status") != "done"), None)
     if active:
         raw_phase = str(active.get("phase") or "translate")
+        raw_task = str(active.get("task") or raw_phase).replace("-", "_")
         if raw_phase.startswith("factual"):
             stage = "factual_audit"
         elif raw_phase.startswith("chinese") or raw_phase.startswith("language"):
@@ -171,6 +178,8 @@ def _current_work(manifest: dict[str, Any], models: dict[str, dict[str, str]]) -
             "chinese_audit": "chinese_audit",
             "promote": "validation",
         }[stage]
+        if raw_task in {"factual_repair", "chinese_repair"}:
+            model_role = "repair"
         model = models.get(model_role, {})
         labels = {
             "translate": "整章直接翻译",
@@ -186,7 +195,10 @@ def _current_work(manifest: dict[str, Any], models: dict[str, dict[str, str]]) -
             "model": model.get("model", ""),
             "provider": model.get("provider", ""),
             "explanation": STAGE_EXPLANATIONS[stage],
-            "precision": f"持久化阶段：{raw_phase}。页面同时显示尚未正式通过的 Shadow。",
+            "precision": (
+                f"持久化阶段：{raw_phase}；下一独立任务：{raw_task}。"
+                "页面同时显示尚未正式通过的 Shadow。"
+            ),
         }
     return {
         "stage": "idle",
@@ -317,6 +329,7 @@ class Observer:
                     "running" if translated else "pending"
                 ),
                 "phase": str(item.get("phase") or ""),
+                "task": str(item.get("task") or ""),
                 "version": version,
                 "translated_segments": translated,
                 "total_segments": total,
@@ -374,6 +387,7 @@ class Observer:
                 "running" if any(segment["translated"] for segment in segments) else "pending"
             ),
             "phase": str(item.get("phase") or ""),
+            "task": str(item.get("task") or ""),
             "version": version,
             "translated_segments": sum(segment["translated"] for segment in segments),
             "total_segments": len(segments),

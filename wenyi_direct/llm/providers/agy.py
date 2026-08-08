@@ -6,7 +6,6 @@ import os
 import re
 import subprocess
 import tempfile
-import threading
 from pathlib import Path
 from typing import Optional
 
@@ -154,9 +153,6 @@ class AgyClient(LLMClient):
         self.timeout = max(1, int(cfg.timeout))
         self.tiers = {**_DEFAULT_TIERS, **cfg.tiers}
         self._resolved_models: dict[str, str] = {}
-        # agy 会维护本机项目/会话状态；串行化与 OpenClaw 的适配策略一致，
-        # 避免 Wenyi 并发阶段在 Windows 上争用同一状态文件。
-        self._process_lock = threading.Lock()
 
     def complete(
         self,
@@ -185,9 +181,7 @@ class AgyClient(LLMClient):
             else _model_candidates(model)
         )
         try:
-            with self._process_lock, tempfile.TemporaryDirectory(
-                prefix="wenyi-direct-agy-"
-            ) as request_dir:
+            with tempfile.TemporaryDirectory(prefix="wenyi-direct-agy-") as request_dir:
                 request_path = Path(request_dir) / _REQUEST_FILE_NAME
                 request_path.write_text(prompt, encoding="utf-8", newline="\n")
                 completed = False

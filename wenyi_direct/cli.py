@@ -11,7 +11,7 @@ from rich.table import Table
 from .assemble.writer import assemble as assemble_document
 from .config import Config
 from .llm.factory import build_clients
-from .pipeline.direct import DirectPipeline, export_json
+from .pipeline.direct import STAGE_NAMES, DirectPipeline, StageTaskError, export_json
 from .pipeline.knowledge import TerminologyStore, TermRule
 from .pipeline.runstore import STATUS_DONE, RunStore, slugify
 from .validate import validate_epub
@@ -75,50 +75,46 @@ def translate(
     chapters: str | None = typer.Option(
         None, help="Optional indexes/ranges, e.g. 0,2-4. Default resumes all pending chapters."
     ),
+    parallel: bool = typer.Option(
+        False,
+        "--parallel",
+        help="Overlap chapter N downstream review with chapter N+1 upstream work.",
+    ),
 ) -> None:
     """Resume direct translation and all configured quality gates."""
     cfg = _load(config)
     clients = build_clients(cfg)
     pipeline = DirectPipeline(cfg, clients, config_dir=config.resolve().parent)
-    store = pipeline.run(source, chapters=_parse_chapters(chapters))
+    selected = _parse_chapters(chapters)
+    store = (
+        pipeline.run_parallel(source, chapters=selected)
+        if parallel
+        else pipeline.run(source, chapters=selected)
+    )
     _print_status(store)
 
 
 @app.command()
-def audit(
+def stage(
+    name: str = typer.Argument(
+        ..., help=f"One of: {', '.join(STAGE_NAMES)}."
+    ),
     source: Path = typer.Argument(..., exists=True, dir_okay=False),
     config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True),
     chapters: str | None = typer.Option(
-        None, help="Optional indexes/ranges, e.g. 0,2-4. Default audits all chapters."
-    ),
-    save_terms: bool = typer.Option(
-        False, "--save-terms", help="Whether to save discovered terms to terminology store."
+        None,
+        help="Optional indexes/ranges. Default runs only chapters ready for this stage.",
     ),
 ) -> None:
-    """Run factual audit only to inspect issues and terminology suggestions without modifying text."""
+    """Run one persisted pipeline stage without continuing into later stages."""
     cfg = _load(config)
     clients = build_clients(cfg)
     pipeline = DirectPipeline(cfg, clients, config_dir=config.resolve().parent)
-    store = pipeline.audit(
-        source,
-        chapters=_parse_chapters(chapters),
-        save_discoveries=save_terms,
-    )
-    manifest = store.load_manifest()
-    table = Table(title=f"Audit Output: {manifest['title']}")
-    table.add_column("Chapter", justify="right")
-    table.add_column("Title")
-    table.add_column("Audit Artifact Path")
-    for chapter in manifest["chapters"]:
-        ci = chapter["index"]
-        artifact = store.audit_artifact_path(ci)
-        table.add_row(
-            str(ci),
-            str(chapter.get("title", "")),
-            artifact if Path(artifact).exists() else "No audit log",
-        )
-    console.print(table)
-    console.print(f"Audit logs recorded in: [cyan]{store.artifacts_dir}/audits/[/cyan]")
+    try:
+        store = pipeline.run_stage(source, name, chapters=_parse_chapters(chapters))
+    except (StageTaskError, ValueError) as error:
+        raise typer.BadParameter(str(error), param_hint="name") from error
+    _print_status(store)
 
 
 @app.command()
@@ -165,6 +161,7 @@ def _print_status(store: RunStore) -> None:
     table.add_column("Title")
     table.add_column("Status")
     table.add_column("Phase")
+    table.add_column("Next stage")
     table.add_column("Error")
     for chapter in manifest["chapters"]:
         table.add_row(
@@ -172,6 +169,7 @@ def _print_status(store: RunStore) -> None:
             str(chapter.get("title", "")),
             str(chapter.get("status", "pending")),
             str(chapter.get("phase", "not_started")),
+            str(chapter.get("task", "")),
             str(chapter.get("error") or ""),
         )
     console.print(table)

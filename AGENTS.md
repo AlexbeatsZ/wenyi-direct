@@ -1,5 +1,25 @@
 # Wenyi Direct agent contract
 
+## Goal
+
+Maintain a chapter-first literary translator whose major stages can run independently
+or through one resumable two-lane scheduler without weakening information boundaries
+or atomic Formal promotion.
+
+## Current State
+
+- The canonical implementation is `DirectPipeline`; sequential, granular, and
+  parallel orchestration share its stage dispatcher.
+- CLI granular execution is `stage <name>`; end-to-end two-lane execution is
+  `translate --parallel`.
+- Detailed scheduling and concurrency rules: `docs/design/stage-execution.md`.
+
+## Active Work
+
+- Granular stages and true two-thread chapter staggering are implemented.
+- The abandoned `agent/stage-commands-and-staggered-pipeline` branch is not the
+  canonical implementation and must not be merged wholesale.
+
 ## Product identity
 
 Wenyi Direct is a command-line long-form literary translator. It is intentionally
@@ -35,7 +55,7 @@ promotion to the final text.
 - Model-discovered terminology is book-local state. Shared terminology configuration
   seeds new runs but is not mutated by translation.
 
-## Development and verification
+## Build / Run / Test
 
 - Use `uv` for Python commands.
 - Add behavioral tests for information boundaries, stable IDs, repair expansion,
@@ -43,3 +63,13 @@ promotion to the final text.
 - Run `uv run ruff check .` and `uv run pytest` before committing.
 - This repository reuses document/provider code from the MIT-licensed Wenyi project;
   keep `LICENSE` and provenance in the README.
+
+## Durable Lessons
+
+- Do not duplicate stage orchestration in a subclass or one CLI function per stage;
+  the previous branch accumulated repeated validation calls and divergent behavior.
+- In staggered execution, defer chapter N+1 terminology activation until chapter N
+  finishes its downstream lane, or future knowledge can leak into N validation.
+- Do not reintroduce a provider-wide Agy process lock: per-call temporary cwd plus
+  `--new-project` is the isolation boundary, and a global lock makes two-lane mode
+  silently sequential when all roles share one provider.

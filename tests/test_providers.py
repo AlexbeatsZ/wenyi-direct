@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
@@ -108,6 +110,36 @@ def test_agy_large_prompt_never_enters_windows_argv(tmp_path, monkeypatch) -> No
 
     assert captured["request_length"] > 70_000
     assert max(map(len, captured["args"])) < 1_000
+
+
+def test_agy_same_provider_allows_two_isolated_calls_to_overlap(
+    tmp_path, monkeypatch
+) -> None:
+    both_running = Barrier(2)
+
+    def fake_run(args, **kwargs):
+        assert (Path(kwargs["cwd"]) / "request.txt").is_file()
+        both_running.wait(timeout=2)
+        return subprocess.CompletedProcess(args, 0, stdout='{"ok":true}', stderr="")
+
+    monkeypatch.setattr("wenyi_direct.llm.providers.agy.subprocess.run", fake_run)
+    client = AgyClient(
+        LLMConfig(
+            provider="agy",
+            cwd=str(tmp_path),
+            tiers={"strong": TierConfig(model="gemini-3.6-flash-high")},
+        )
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        calls = [
+            executor.submit(
+                client.complete,
+                [{"role": "user", "content": f"request {index}"}],
+                json_mode=True,
+            )
+            for index in range(2)
+        ]
+        assert [call.result() for call in calls] == ['{"ok":true}', '{"ok":true}']
 
 
 def test_anthropic_messages_wire_format(monkeypatch) -> None:

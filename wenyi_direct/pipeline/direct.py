@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +39,20 @@ from .window import WindowPlanner, split_write_scope
 
 class AlignmentError(RuntimeError):
     """A structured response omitted, duplicated, or invented stable IDs."""
+
+
+class StageTaskError(RuntimeError):
+    """The requested standalone stage does not match persisted chapter state."""
+
+
+STAGE_NAMES = (
+    "translate",
+    "factual-audit",
+    "factual-repair",
+    "chinese-audit",
+    "chinese-repair",
+    "promote",
+)
 
 
 _SPEAKER_METADATA_PREFIX_RE = re.compile(r"^\s*【話者：[^】]*】\s*")
@@ -76,6 +92,8 @@ class DirectPipeline:
         self._base_terminology = TerminologyStore.load(terms_path)
         self.terminology = self._base_terminology
         self._run_terminologies: dict[str, TerminologyStore] = {}
+        self._terminology_lock = threading.RLock()
+        self._allow_provisional_factual_context = False
 
     def _activate_terminology_for(self, store: RunStore) -> None:
         """Keep model discoveries inside one book's state, never in shared config."""
@@ -153,97 +171,157 @@ class DirectPipeline:
                     self._save_usage(store)
         return store
 
-    def audit(
+    def run_stage(
         self,
         source_path: str | Path,
+        stage: str,
         *,
         chapters: set[int] | None = None,
-        save_discoveries: bool = False,
     ) -> RunStore:
+        """Run exactly one ready stage per selected chapter, then stop."""
+        stage = self._normalise_stage(stage)
         store = self.prepare(source_path)
         with store.lock():
-            manifest = store.load_manifest()
-            all_chapters = [c["index"] for c in manifest["chapters"]]
-            pending = all_chapters if chapters is None else [i for i in all_chapters if i in chapters]
-            for chapter_index in pending:
+            selected = self._selected_chapters(store, chapters)
+            if chapters is None:
+                selected = [
+                    index
+                    for index in selected
+                    if self._stage_is_ready(store, index, stage)
+                ]
+            for chapter_index in selected:
                 try:
-                    self._audit_chapter_only(store, chapter_index, save_discoveries=save_discoveries)
+                    self._run_stage_for_chapter(store, chapter_index, stage)
                 finally:
                     self._save_usage(store)
         return store
 
-    def _audit_chapter_only(
-        self, store: RunStore, chapter_index: int, *, save_discoveries: bool = False
-    ) -> list[dict]:
-        chapter = store.load_chapter(chapter_index)
-        shadow = store.load_shadow(chapter_index)
-        if shadow and shadow.get("targets"):
-            targets = self._targets(shadow)
-        else:
-            targets = {segment.index: segment.target or "" for segment in chapter.segments}
+    def run_parallel(
+        self,
+        source_path: str | Path,
+        *,
+        chapters: set[int] | None = None,
+    ) -> RunStore:
+        """Overlap downstream review of chapter N with upstream work on N+1."""
+        store = self.prepare(source_path)
+        with store.lock():
+            selected = self._selected_chapters(store, chapters, pending_only=True)
+            if not selected:
+                return store
+            self._allow_provisional_factual_context = True
+            try:
+                for contiguous in self._contiguous_runs(selected):
+                    self._run_parallel_sequence(store, contiguous)
+            finally:
+                self._allow_provisional_factual_context = False
+                self._save_usage(store)
+        return store
 
-        issues: list[dict] = []
-        audit_lengths = {
-            segment.index: len(segment.source) + len(targets.get(segment.index, ""))
-            for segment in chapter.text_segments
-        }
-        for window in self.window_planner.plan(chapter, audit_lengths):
-            source = "\n".join(chapter.segments[index].source for index in window.read_indexes)
-            messages = factual_audit_messages(
-                chapter,
-                window.read_indexes,
-                window.write_indexes,
-                targets,
-                self._knowledge_for(store, chapter, source),
+    @staticmethod
+    def _normalise_stage(value: str) -> str:
+        stage = value.strip().casefold().replace("_", "-")
+        if stage not in STAGE_NAMES:
+            raise ValueError(f"unknown stage {value!r}; choose from {list(STAGE_NAMES)}")
+        return stage
+
+    @staticmethod
+    def _selected_chapters(
+        store: RunStore,
+        chapters: set[int] | None,
+        *,
+        pending_only: bool = False,
+    ) -> list[int]:
+        manifest = store.load_manifest()
+        status = {int(item["index"]): item.get("status") for item in manifest["chapters"]}
+        known = set(status)
+        selected = known if chapters is None else set(chapters)
+        unknown = selected - known
+        if unknown:
+            raise ValueError(f"unknown chapter indexes: {sorted(unknown)}")
+        if pending_only:
+            selected = {index for index in selected if status[index] != STATUS_DONE}
+        return sorted(selected)
+
+    @staticmethod
+    def _contiguous_runs(indexes: list[int]) -> list[list[int]]:
+        runs: list[list[int]] = []
+        for index in indexes:
+            if not runs or index != runs[-1][-1] + 1:
+                runs.append([index])
+            else:
+                runs[-1].append(index)
+        return runs
+
+    def _run_parallel_sequence(self, store: RunStore, chapters: list[int]) -> None:
+        self._run_upstream(store, chapters[0], include_repair=True)
+        previous = chapters[0]
+        for current in chapters[1:]:
+            store.log_event(
+                "parallel_pair_started",
+                downstream_chapter=previous,
+                upstream_chapter=current,
             )
-            input_ref = store.save_translation_input(
-                {"stage": "factual_audit_only", "messages": messages}
-            )
-            response = self.clients["factual_audit"].complete_json(
-                messages,
-                tier=self.config.pipeline.audit_tier,
-                stage="factual_audit",
-            )
-            parsed = self._parse_issues(
-                chapter,
-                response,
-                set(window.write_indexes),
-                set(window.read_indexes),
-            )
-            issues.extend(parsed)
-            discoveries = (
-                list(response.get("term_candidates", []))
-                if isinstance(response, dict)
-                and isinstance(response.get("term_candidates", []), list)
-                else []
-            )
-            added_terms = []
-            if save_discoveries:
-                added_terms = self.terminology.add_discoveries(
-                    chapter.index,
-                    discoveries,
-                    source,
-                    "\n".join(targets[index] for index in window.read_indexes),
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                downstream = executor.submit(self._run_downstream, store, previous)
+                upstream = executor.submit(
+                    self._run_upstream, store, current, include_repair=False, defer_terms=True
                 )
-            store.record_audit(
-                chapter.index,
-                "factual_audit",
-                {
-                    "input_ref": input_ref,
-                    "issues": parsed,
-                    "term_candidates": discoveries,
-                    "added_terms": [term.model_dump(exclude_none=True) for term in added_terms],
-                },
+                downstream.result()
+                upstream.result()
+            self._run_upstream(store, current, include_repair=True)
+            store.log_event(
+                "parallel_pair_completed",
+                downstream_chapter=previous,
+                upstream_chapter=current,
             )
-        store.log_event(
-            "factual_audit_only_completed",
-            chapter=chapter.index,
-            issues_count=len(issues),
-            save_discoveries=save_discoveries,
-        )
-        return issues
+            self._save_usage(store)
+            previous = current
+        self._run_downstream(store, previous)
+
+    def _run_upstream(
+        self,
+        store: RunStore,
+        chapter_index: int,
+        *,
+        include_repair: bool,
+        defer_terms: bool = False,
+    ) -> None:
+        chapter, shadow = self._load_shadow(store, chapter_index)
+        if shadow["phase"] == "translate":
+            self._run_stage_for_chapter(store, chapter_index, "translate")
+            chapter, shadow = self._load_shadow(store, chapter_index)
+        if shadow["phase"] == "factual_audit" and not self._factual_audit_complete(shadow):
+            self._run_stage_for_chapter(
+                store, chapter_index, "factual-audit", defer_terms=defer_terms
+            )
+            chapter, shadow = self._load_shadow(store, chapter_index)
+        if include_repair and shadow["phase"] == "factual_audit":
+            self._run_stage_for_chapter(store, chapter_index, "factual-repair")
+
+    def _run_downstream(self, store: RunStore, chapter_index: int) -> None:
+        while True:
+            _chapter, shadow = self._load_shadow(store, chapter_index)
+            stage = self._next_stage(shadow)
+            if stage in {"chinese-audit", "chinese-repair", "promote"}:
+                self._run_stage_for_chapter(store, chapter_index, stage)
+                continue
+            if stage == "done":
+                return
+            raise StageTaskError(
+                f"chapter {chapter_index} is not ready for downstream work: {stage}"
+            )
 
     def _run_chapter(self, store: RunStore, chapter_index: int) -> None:
+        while True:
+            _chapter, shadow = self._load_shadow(store, chapter_index)
+            stage = self._next_stage(shadow)
+            if stage == "done":
+                return
+            self._run_stage_for_chapter(store, chapter_index, stage)
+
+    def _load_shadow(
+        self, store: RunStore, chapter_index: int
+    ) -> tuple[Chapter, dict[str, Any]]:
         chapter = store.load_chapter(chapter_index)
         digest = chapter_source_digest(chapter)
         shadow = store.load_shadow(chapter_index)
@@ -267,7 +345,9 @@ class DirectPipeline:
                 phase = "promote"
             previous_policy = shadow.get("policy_fingerprint")
             shadow["phase"] = phase
+            shadow.pop("factual_state", None)
             shadow.pop("chinese_state", None)
+            shadow.setdefault("stage_snapshots", {}).pop("factual", None)
             self._save_shadow(store, chapter.index, shadow)
             store.log_event(
                 "shadow_policy_invalidated",
@@ -278,7 +358,7 @@ class DirectPipeline:
             )
         if not shadow:
             shadow = {
-                "schema": 1,
+                "schema": 2,
                 "chapter": chapter_index,
                 "source_digest": digest,
                 "phase": "translate",
@@ -286,34 +366,108 @@ class DirectPipeline:
                     str(segment.index): segment.target or "" for segment in chapter.segments
                 },
                 "translated_ids": [],
+                "stage_snapshots": {},
             }
             self._save_shadow(store, chapter_index, shadow)
         elif shadow.get("policy_fingerprint") is None:
             # Legacy shadows can resume without discarding paid model work. All current
             # promotion gates still run, and subsequent policy changes are fingerprinted.
             self._save_shadow(store, chapter_index, shadow)
+        shadow.setdefault("stage_snapshots", {})
         self._clean_shadow_control_metadata(store, chapter, shadow)
-        store.set_chapter_fields(chapter_index, phase=shadow["phase"], error=None)
+        return chapter, shadow
+
+    @staticmethod
+    def _factual_audit_complete(shadow: dict[str, Any]) -> bool:
+        state = shadow.get("factual_state", {})
+        return isinstance(state, dict) and state.get("audit_complete") is True
+
+    @staticmethod
+    def _chinese_audit_complete(shadow: dict[str, Any]) -> bool:
+        state = shadow.get("chinese_state", {})
+        return isinstance(state, dict) and state.get("audit_complete") is True
+
+    def _next_stage(self, shadow: dict[str, Any]) -> str:
+        phase = str(shadow.get("phase", "unknown"))
+        if phase == "factual_audit":
+            return "factual-repair" if self._factual_audit_complete(shadow) else "factual-audit"
+        if phase == "chinese_audit":
+            return "chinese-repair" if self._chinese_audit_complete(shadow) else "chinese-audit"
+        return {"translate": "translate", "promote": "promote", "done": "done"}.get(
+            phase, phase
+        )
+
+    def _stage_is_ready(self, store: RunStore, chapter_index: int, stage: str) -> bool:
+        manifest = store.load_manifest()
+        item = next(row for row in manifest["chapters"] if row["index"] == chapter_index)
+        if item.get("status") == STATUS_DONE:
+            return False
+        _chapter, shadow = self._load_shadow(store, chapter_index)
+        return self._next_stage(shadow) == stage
+
+    def _run_stage_for_chapter(
+        self,
+        store: RunStore,
+        chapter_index: int,
+        stage: str,
+        *,
+        defer_terms: bool = False,
+    ) -> None:
+        manifest = store.load_manifest()
+        item = next(row for row in manifest["chapters"] if row["index"] == chapter_index)
+        if item.get("status") == STATUS_DONE:
+            raise StageTaskError(f"chapter {chapter_index} is already done")
+        chapter, shadow = self._load_shadow(store, chapter_index)
+        expected = self._next_stage(shadow)
+        if expected != stage:
+            raise StageTaskError(
+                f"chapter {chapter_index} cannot run {stage}: next stage is {expected}"
+            )
+        store.set_chapter_fields(
+            chapter_index,
+            status="pending",
+            phase=shadow["phase"],
+            task=stage,
+            error=None,
+        )
+        store.log_event("stage_started", chapter=chapter_index, stage=stage)
         try:
-            if shadow["phase"] == "translate":
+            if stage == "translate":
                 self._translate_chapter(store, chapter, shadow)
-            if shadow["phase"] == "factual_audit":
-                self._factual_stage(store, chapter, shadow)
-            if shadow["phase"] == "chinese_audit":
-                self._chinese_stage(store, chapter, shadow)
-            if shadow["phase"] == "promote":
+            elif stage == "factual-audit":
+                self._factual_audit_task(store, chapter, shadow, defer_terms=defer_terms)
+            elif stage == "factual-repair":
+                self._factual_repair_task(store, chapter, shadow)
+            elif stage == "chinese-audit":
+                self._chinese_audit_task(store, chapter, shadow)
+            elif stage == "chinese-repair":
+                self._chinese_repair_task(store, chapter, shadow)
+            elif stage == "promote":
                 self._promote(store, chapter, shadow)
         except Exception as exc:
             store.set_chapter_fields(
-                chapter_index, phase=shadow.get("phase", "unknown"), error=str(exc)
+                chapter_index,
+                phase=shadow.get("phase", "unknown"),
+                task=stage,
+                error=str(exc),
             )
             store.log_event(
-                "chapter_failed",
+                "stage_failed",
                 chapter=chapter_index,
-                phase=shadow.get("phase"),
+                stage=stage,
                 error=str(exc),
             )
             raise
+        next_stage = self._next_stage(shadow)
+        store.set_chapter_fields(
+            chapter_index,
+            phase=shadow.get("phase", "unknown"),
+            task=next_stage,
+            error=None,
+        )
+        store.log_event(
+            "stage_completed", chapter=chapter_index, stage=stage, next_stage=next_stage
+        )
 
     @staticmethod
     def _targets(shadow: dict[str, Any]) -> dict[int, str]:
@@ -324,18 +478,19 @@ class DirectPipeline:
         shadow["targets"] = {str(index): target for index, target in targets.items()}
 
     def _policy_fingerprint(self) -> str:
-        payload = {
-            "config": self.config.model_dump(mode="json"),
-            "terminology": self.terminology.document.model_dump(mode="json"),
-            "prompts": [
-                TRANSLATION_SYSTEM,
-                FACTUAL_AUDIT_SYSTEM,
-                CHINESE_READER_SYSTEM,
-                CHINESE_FINDING_VALIDATION_SYSTEM,
-                REPAIR_SYSTEM,
-                FIDELITY_SYSTEM,
-            ],
-        }
+        with self._terminology_lock:
+            payload = {
+                "config": self.config.model_dump(mode="json"),
+                "terminology": self.terminology.document.model_dump(mode="json"),
+                "prompts": [
+                    TRANSLATION_SYSTEM,
+                    FACTUAL_AUDIT_SYSTEM,
+                    CHINESE_READER_SYSTEM,
+                    CHINESE_FINDING_VALIDATION_SYSTEM,
+                    REPAIR_SYSTEM,
+                    FIDELITY_SYSTEM,
+                ],
+            }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
@@ -399,9 +554,12 @@ class DirectPipeline:
             raise AlignmentError(
                 f"chapter translation incomplete: missing {sorted(expected - completed)}"
             )
+        shadow.setdefault("stage_snapshots", {})["direct"] = dict(shadow["targets"])
         shadow["phase"] = (
             "factual_audit" if self.config.pipeline.factual_audit else "chinese_audit"
         )
+        if not self.config.pipeline.factual_audit:
+            shadow["stage_snapshots"]["factual"] = dict(shadow["targets"])
         if not self.config.pipeline.factual_audit and not self.config.pipeline.chinese_reader_audit:
             shadow["phase"] = "promote"
         self._save_shadow(store, chapter.index, shadow)
@@ -449,16 +607,43 @@ class DirectPipeline:
         )
         return translated
 
-    def _factual_stage(
-        self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
+    def _factual_audit_task(
+        self,
+        store: RunStore,
+        chapter: Chapter,
+        shadow: dict[str, Any],
+        *,
+        defer_terms: bool = False,
     ) -> None:
         targets = self._targets(shadow)
-        issues: list[dict] = []
-        audit_lengths = {
-            segment.index: len(segment.source) + len(targets.get(segment.index, ""))
-            for segment in chapter.text_segments
-        }
-        for window in self.window_planner.plan(chapter, audit_lengths):
+        state = shadow.setdefault("factual_state", {})
+        if state.get("audit_complete") is True:
+            return
+        plan = state.get("plan")
+        if not isinstance(plan, list):
+            audit_lengths = {
+                segment.index: len(segment.source) + len(targets.get(segment.index, ""))
+                for segment in chapter.text_segments
+            }
+            plan = [
+                {
+                    "read_indexes": list(window.read_indexes),
+                    "write_indexes": list(window.write_indexes),
+                }
+                for window in self.window_planner.plan(chapter, audit_lengths)
+            ]
+            state["plan"] = plan
+            state["audit_batches"] = {}
+            state["completed_repair_regions"] = []
+            self._save_shadow(store, chapter.index, shadow)
+        audit_batches = state.setdefault("audit_batches", {})
+        for batch_index, item in enumerate(plan):
+            key = str(batch_index)
+            if key in audit_batches:
+                continue
+            window = TranslationWindow(
+                tuple(item["read_indexes"]), tuple(item["write_indexes"])
+            )
             source = "\n".join(chapter.segments[index].source for index in window.read_indexes)
             messages = factual_audit_messages(
                 chapter,
@@ -481,28 +666,90 @@ class DirectPipeline:
                 set(window.write_indexes),
                 set(window.read_indexes),
             )
-            issues.extend(parsed)
             discoveries = (
                 list(response.get("term_candidates", []))
                 if isinstance(response, dict)
                 and isinstance(response.get("term_candidates", []), list)
                 else []
             )
-            added_terms = self.terminology.add_discoveries(
-                chapter.index,
-                discoveries,
-                source,
-                "\n".join(targets[index] for index in window.read_indexes),
-            )
+            added_terms = []
+            discoveries_applied = not defer_terms
+            if discoveries_applied:
+                with self._terminology_lock:
+                    added_terms = self.terminology.add_discoveries(
+                        chapter.index,
+                        discoveries,
+                        source,
+                        "\n".join(targets[index] for index in window.read_indexes),
+                    )
+            audit_batches[key] = {
+                "read_indexes": list(window.read_indexes),
+                "write_indexes": list(window.write_indexes),
+                "issues": parsed,
+                "term_candidates": discoveries,
+                "discoveries_applied": discoveries_applied,
+                "added_terms": [term.model_dump(exclude_none=True) for term in added_terms],
+            }
             store.record_audit(
                 chapter.index,
                 "factual_audit",
                 {
                     "input_ref": input_ref,
                     "issues": parsed,
+                    "term_candidates": discoveries,
+                    "discoveries_deferred": defer_terms,
                     "added_terms": [term.model_dump(exclude_none=True) for term in added_terms],
                 },
             )
+            self._save_shadow(store, chapter.index, shadow)
+        state["audit_complete"] = True
+        self._save_shadow(store, chapter.index, shadow)
+
+    def _apply_deferred_discoveries(
+        self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
+    ) -> None:
+        state = shadow.get("factual_state", {})
+        batches = state.get("audit_batches", {}) if isinstance(state, dict) else {}
+        targets = self._targets(shadow)
+        changed = False
+        for batch in batches.values():
+            if not isinstance(batch, dict) or batch.get("discoveries_applied") is True:
+                continue
+            read_indexes = tuple(int(index) for index in batch.get("read_indexes", []))
+            source = "\n".join(chapter.segments[index].source for index in read_indexes)
+            with self._terminology_lock:
+                added_terms = self.terminology.add_discoveries(
+                    chapter.index,
+                    list(batch.get("term_candidates", [])),
+                    source,
+                    "\n".join(targets[index] for index in read_indexes),
+                )
+            batch["discoveries_applied"] = True
+            batch["added_terms"] = [
+                term.model_dump(exclude_none=True) for term in added_terms
+            ]
+            changed = True
+        if changed:
+            self._save_shadow(store, chapter.index, shadow)
+            store.log_event("deferred_terms_activated", chapter=chapter.index)
+
+    def _factual_repair_task(
+        self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
+    ) -> None:
+        if not self._factual_audit_complete(shadow):
+            raise StageTaskError(
+                f"chapter {chapter.index} requires factual-audit before factual-repair"
+            )
+        self._apply_deferred_discoveries(store, chapter, shadow)
+        targets = self._targets(shadow)
+        state = shadow["factual_state"]
+        batches = state.get("audit_batches", {})
+        issues = [
+            issue
+            for batch in batches.values()
+            if isinstance(batch, dict)
+            for issue in batch.get("issues", [])
+        ]
         issues.extend(
             self._terminology_issues(
                 chapter,
@@ -510,19 +757,40 @@ class DirectPipeline:
                 tuple(segment.index for segment in chapter.text_segments),
             )
         )
-        for region in self.repair_planner.plan(issues, len(chapter.segments)):
+        if not isinstance(state.get("repair_regions"), list):
+            state["repair_regions"] = [
+                {
+                    "id": f"factual-r{index}",
+                    "start": region.start,
+                    "end": region.end,
+                    "issues": list(region.issues),
+                }
+                for index, region in enumerate(
+                    self.repair_planner.plan(issues, len(chapter.segments))
+                )
+            ]
+            self._save_shadow(store, chapter.index, shadow)
+        completed = set(state.setdefault("completed_repair_regions", []))
+        for item in state["repair_regions"]:
+            region_id = str(item["id"])
+            if region_id in completed:
+                continue
+            region = RepairRegion(int(item["start"]), int(item["end"]), tuple(item["issues"]))
             targets = self._repair_and_validate(
                 store, chapter, targets, region, "factual_repair"
             )
             self._save_targets(shadow, targets)
+            completed.add(region_id)
+            state["completed_repair_regions"] = sorted(completed)
             self._save_shadow(store, chapter.index, shadow)
+        shadow.setdefault("stage_snapshots", {})["factual"] = dict(shadow["targets"])
         shadow["phase"] = (
             "chinese_audit" if self.config.pipeline.chinese_reader_audit else "promote"
         )
         self._save_shadow(store, chapter.index, shadow)
         store.set_chapter_fields(chapter.index, phase=shadow["phase"])
 
-    def _chinese_stage(
+    def _chinese_audit_task(
         self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
     ) -> None:
         targets = self._targets(shadow)
@@ -566,23 +834,17 @@ class DirectPipeline:
                 )
                 state["reader_batches"] = stored_reader
                 self._save_shadow(store, chapter.index, shadow)
-        reader_batches = [
-            (
-                TranslationWindow(
-                    tuple(item["read_indexes"]), tuple(item["write_indexes"])
-                ),
-                list(item["issues"]),
-            )
-            for item in stored_reader
-        ]
-
         stored_validations = state.setdefault("validation_batches", {})
-        accepted_batches: list[tuple[int, TranslationWindow, list[dict]]] = []
-        for batch_index, (window, batch) in enumerate(reader_batches):
+        accepted_batches: list[tuple[int, list[dict[str, Any]]]] = []
+        for batch_index, item in enumerate(stored_reader):
+            window = TranslationWindow(
+                tuple(item["read_indexes"]), tuple(item["write_indexes"])
+            )
+            batch = list(item["issues"])
             if not batch:
                 continue
             tagged = [
-                {**issue, "finding_id": f"f{index}"}
+                {**issue, "finding_id": f"b{batch_index}-f{index}"}
                 for index, issue in enumerate(batch)
             ]
             key = str(batch_index)
@@ -622,43 +884,76 @@ class DirectPipeline:
                     )
                 stored_validations[key] = results
                 self._save_shadow(store, chapter.index, shadow)
-            batch_accepted: list[dict] = []
-            for result in results:
-                if result["safe_to_repair"]:
-                    batch_accepted.append(result)
+            batch_accepted = [result for result in results if result["safe_to_repair"]]
             if batch_accepted:
-                accepted_batches.append((batch_index, window, batch_accepted))
-
-        completed_repairs = set(state.setdefault("completed_repair_batches", []))
-        for batch_index, window, batch in accepted_batches:
-            if batch_index in completed_repairs:
-                continue
-            regions = self.repair_planner.plan(batch, len(chapter.segments))
-            write_indexes = tuple(
-                sorted(
+                accepted_batches.append((batch_index, batch_accepted))
+        if not isinstance(state.get("repair_regions"), list):
+            repair_regions: list[dict[str, Any]] = []
+            legacy_completed = {
+                int(index) for index in state.get("completed_repair_batches", [])
+            }
+            completed_region_ids: list[str] = []
+            for batch_index, batch in accepted_batches:
+                planned = self.repair_planner.plan(batch, len(chapter.segments))
+                write_indexes = sorted(
                     {
                         index
-                        for region in regions
+                        for region in planned
                         for index in region.indexes
                         if chapter.segments[index].source.strip()
                     }
                 )
+                if not write_indexes:
+                    continue
+                repair_regions.append(
+                    {
+                        "id": f"language-b{batch_index}",
+                        "start": write_indexes[0],
+                        "end": write_indexes[-1],
+                        "write_indexes": write_indexes,
+                        "issues": [
+                            issue for region in planned for issue in region.issues
+                        ],
+                    }
+                )
+                if batch_index in legacy_completed:
+                    completed_region_ids.append(f"language-b{batch_index}")
+            state["repair_regions"] = repair_regions
+            state["completed_repair_regions"] = completed_region_ids
+            state.pop("completed_repair_batches", None)
+        state["audit_complete"] = True
+        self._save_shadow(store, chapter.index, shadow)
+
+    def _chinese_repair_task(
+        self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
+    ) -> None:
+        if not self._chinese_audit_complete(shadow):
+            raise StageTaskError(
+                f"chapter {chapter.index} requires chinese-audit before chinese-repair"
+            )
+        targets = self._targets(shadow)
+        state = shadow["chinese_state"]
+        completed = set(state.setdefault("completed_repair_regions", []))
+        for item in state.get("repair_regions", []):
+            region_id = str(item["id"])
+            if region_id in completed:
+                continue
+            region = RepairRegion(int(item["start"]), int(item["end"]), tuple(item["issues"]))
+            write_indexes = tuple(
+                int(index)
+                for index in item.get("write_indexes", region.indexes)
+                if chapter.segments[int(index)].source.strip()
             )
             if not write_indexes:
-                completed_repairs.add(batch_index)
-                state["completed_repair_batches"] = sorted(completed_repairs)
+                completed.add(region_id)
+                state["completed_repair_regions"] = sorted(completed)
                 self._save_shadow(store, chapter.index, shadow)
                 continue
-            combined = RepairRegion(
-                write_indexes[0],
-                write_indexes[-1],
-                tuple(issue for region in regions for issue in region.issues),
-            )
             targets = self._repair_and_validate(
                 store,
                 chapter,
                 targets,
-                combined,
+                region,
                 "language_repair",
                 read_indexes=self._read_scope_for_range(
                     chapter, write_indexes[0], write_indexes[-1], targets
@@ -666,8 +961,8 @@ class DirectPipeline:
                 write_indexes=write_indexes,
             )
             self._save_targets(shadow, targets)
-            completed_repairs.add(batch_index)
-            state["completed_repair_batches"] = sorted(completed_repairs)
+            completed.add(region_id)
+            state["completed_repair_regions"] = sorted(completed)
             self._save_shadow(store, chapter.index, shadow)
         shadow["phase"] = "promote"
         self._save_shadow(store, chapter.index, shadow)
@@ -1084,35 +1379,58 @@ class DirectPipeline:
         self, store: RunStore, chapter: Chapter, read_source: str
     ) -> dict[str, Any]:
         """Combine confirmed knowledge with a bounded, past-only raw chapter tail."""
-        visible = self.terminology.visible(chapter.index, read_source)
+        with self._terminology_lock:
+            visible = self.terminology.visible(chapter.index, read_source)
         remaining = self.config.window.past_context_chars
         tail: list[dict[str, Any]] = []
         manifest = store.load_manifest()
         status = {item["index"]: item.get("status") for item in manifest["chapters"]}
         for previous_index in range(chapter.index - 1, -1, -1):
-            if remaining <= 0 or status.get(previous_index) != STATUS_DONE:
+            if remaining <= 0:
                 break
+            provisional: dict[str, str] | None = None
+            if status.get(previous_index) != STATUS_DONE:
+                if not self._allow_provisional_factual_context:
+                    break
+                shadow = store.load_shadow(previous_index)
+                snapshots = shadow.get("stage_snapshots", {}) if shadow else {}
+                candidate = snapshots.get("factual") if isinstance(snapshots, dict) else None
+                if not isinstance(candidate, dict):
+                    break
+                provisional = {str(key): str(value) for key, value in candidate.items()}
             previous = store.load_chapter(previous_index)
             for segment in reversed(previous.text_segments):
-                target = segment.target or ""
+                target = (
+                    provisional.get(str(segment.index), "")
+                    if provisional is not None
+                    else segment.target or ""
+                )
                 cost = len(segment.source) + len(target)
                 if tail and cost > remaining:
                     break
-                tail.append(
-                    {
-                        "chapter": previous_index,
-                        "segment": segment.index,
-                        "source": segment.source,
-                        "formal_target": target,
-                    }
-                )
+                row: dict[str, Any] = {
+                    "chapter": previous_index,
+                    "segment": segment.index,
+                    "source": segment.source,
+                }
+                if provisional is None:
+                    row["formal_target"] = target
+                else:
+                    row["factual_target"] = target
+                    row["provisional"] = True
+                tail.append(row)
                 remaining -= cost
                 if remaining <= 0:
                     break
         visible["past_only_raw_tail"] = list(reversed(tail))
+        past_label = (
+            "previous factual snapshot > past formal target"
+            if any(item.get("provisional") for item in tail)
+            else "past formal target"
+        )
         visible["evidence_priority"] = (
             "current_and_nearby_source > active hard terms > active preferred terms > "
-            "past formal target"
+            f"{past_label}"
         )
         return visible
 
@@ -1123,29 +1441,30 @@ class DirectPipeline:
         indexes: tuple[int, ...],
     ) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
-        for index in indexes:
-            segment = chapter.segments[index]
-            violations = self.terminology.hard_violations(
-                chapter.index, segment.source, targets.get(index, "")
-            )
-            for violation in violations:
-                issues.append(
-                    {
-                        "start": index,
-                        "end": index,
-                        "cause_start": index,
-                        "cause_end": index,
-                        "start_id": segment_id(chapter.index, segment),
-                        "end_id": segment_id(chapter.index, segment),
-                        "type": "term",
-                        "detail": (
-                            f"硬术语 {violation['source']!r} 必须采用 "
-                            f"{violation['required_target']!r}"
-                        ),
-                        "required_meaning": violation["required_target"],
-                        "terminology_violation": violation,
-                    }
+        with self._terminology_lock:
+            for index in indexes:
+                segment = chapter.segments[index]
+                violations = self.terminology.hard_violations(
+                    chapter.index, segment.source, targets.get(index, "")
                 )
+                for violation in violations:
+                    issues.append(
+                        {
+                            "start": index,
+                            "end": index,
+                            "cause_start": index,
+                            "cause_end": index,
+                            "start_id": segment_id(chapter.index, segment),
+                            "end_id": segment_id(chapter.index, segment),
+                            "type": "term",
+                            "detail": (
+                                f"硬术语 {violation['source']!r} 必须采用 "
+                                f"{violation['required_target']!r}"
+                            ),
+                            "required_meaning": violation["required_target"],
+                            "terminology_violation": violation,
+                        }
+                    )
         return issues
 
 

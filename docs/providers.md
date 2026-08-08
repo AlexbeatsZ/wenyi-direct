@@ -46,8 +46,10 @@ providers:
 The adapter writes the complete business prompt to a per-call UTF-8 temporary TXT
 file. Only a short instruction and file name enter `--print`, so full-chapter prompts
 cannot exceed Windows' command-line limit. Each call uses a fresh temporary workspace,
-`--new-project`, sandbox restrictions, disabled slash expansion, and serialized
-process access. `isolate_user_config: true` additionally requires a dedicated `cwd`
+`--new-project`, sandbox restrictions, and disabled slash expansion. Calls may
+overlap because their workspaces, request files, and new-project sessions are
+independent; this remains true when all roles share one configured provider.
+`isolate_user_config: true` additionally requires a dedicated `cwd`
 and gives the child isolated HOME/USERPROFILE state; it is recommended for every Agy
 provider and is mechanically exercised by the provider tests.
 

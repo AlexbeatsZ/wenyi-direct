@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,12 @@ from wenyi_direct.cli import app
 from wenyi_direct.config import Config
 from wenyi_direct.ingest.models import Chapter, Segment
 from wenyi_direct.llm.providers.fake import FakeClient
-from wenyi_direct.pipeline.direct import AlignmentError, DirectPipeline, export_json
+from wenyi_direct.pipeline.direct import (
+    AlignmentError,
+    DirectPipeline,
+    StageTaskError,
+    export_json,
+)
 from wenyi_direct.pipeline.types import segment_id
 from wenyi_direct.prompts import (
     CHINESE_FINDING_VALIDATION_SYSTEM,
@@ -519,19 +525,171 @@ def test_resume_rejects_changed_source_file(tmp_path: Path) -> None:
         pipeline.prepare(source)
 
 
-def test_cli_audit_standalone(tmp_path: Path) -> None:
+def test_each_stage_stops_at_its_declared_boundary(tmp_path: Path) -> None:
     source = tmp_path / "book.json"
     _write_book(source)
-    fake_client = FakeClient(lambda msgs, tier, jmode: '{"issues": [], "term_candidates": []}')
     config = _config(tmp_path)
-    clients = {
-        role: fake_client
-        for role in ("translate", "factual_audit", "chinese_audit", "repair", "validation")
-    }
-    pipeline = DirectPipeline(config, clients, config_dir=tmp_path)
-    store = pipeline.audit(source)
-    assert store.exists()
-    manifest = store.load_manifest()
-    assert manifest["title"] == "夜の章"
+    fake = FakeClient(_handler)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+
+    store = pipeline.run_stage(source, "translate", chapters={0})
+    assert store.load_shadow(0)["phase"] == "factual_audit"
+    assert [call["stage"] for call in fake.calls] == ["direct_translation"]
+
+    pipeline.run_stage(source, "factual-audit", chapters={0})
+    shadow = store.load_shadow(0)
+    assert shadow["phase"] == "factual_audit"
+    assert shadow["factual_state"]["audit_complete"] is True
+    assert not any(call["stage"] == "factual_repair" for call in fake.calls)
+
+    pipeline.run_stage(source, "factual-repair", chapters={0})
+    assert store.load_shadow(0)["phase"] == "chinese_audit"
+    factual_repairs = sum(call["stage"] == "factual_repair" for call in fake.calls)
+    assert factual_repairs == 1
+
+    pipeline.run_stage(source, "chinese-audit", chapters={0})
+    shadow = store.load_shadow(0)
+    assert shadow["phase"] == "chinese_audit"
+    assert shadow["chinese_state"]["audit_complete"] is True
+    assert not any(call["stage"] == "language_repair" for call in fake.calls)
+
+    pipeline.run_stage(source, "chinese-repair", chapters={0})
+    assert store.load_shadow(0)["phase"] == "promote"
+    assert any(call["stage"] == "language_repair" for call in fake.calls)
+    assert sum(call["stage"] == "factual_repair" for call in fake.calls) == factual_repairs
+
+    pipeline.run_stage(source, "promote", chapters={0})
+    assert store.load_shadow(0)["phase"] == "done"
+    assert store.load_manifest()["chapters"][0]["status"] == "done"
+    with pytest.raises(StageTaskError, match="already done"):
+        pipeline.run_stage(source, "translate", chapters={0})
 
 
+def test_parallel_pipeline_really_overlaps_and_defers_future_terms(tmp_path: Path) -> None:
+    source = tmp_path / "parallel.json"
+    source.write_text(
+        json.dumps(
+            {
+                "title": "parallel",
+                "chapters": [
+                    {"title": "c0", "segments": [{"source": "共通語。"}]},
+                    {"title": "c1", "segments": [{"source": "共通語。"}]},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    config = _config(tmp_path)
+    chinese_zero_started = threading.Event()
+    factual_one_started = threading.Event()
+    saw_provisional_context = threading.Event()
+    future_term_absent_from_previous = threading.Event()
+
+    def handler(messages, _tier, _json_mode):
+        system = messages[0]["content"]
+        payload = _payload(messages)
+        if system == TRANSLATION_SYSTEM:
+            required = payload["required_output"]["translations"]
+            if str(required[0]["id"]).startswith("ch1:"):
+                tail = payload["knowledge"]["past_only_raw_tail"]
+                if tail and tail[-1].get("provisional") is True:
+                    saw_provisional_context.set()
+            return json.dumps(
+                {"translations": [{"id": item["id"], "target": "共同词。"} for item in required]},
+                ensure_ascii=False,
+            )
+        if system == FACTUAL_AUDIT_SYSTEM:
+            audited = next(item for item in payload["segments"] if item["audit"])
+            if str(audited["id"]).startswith("ch1:"):
+                factual_one_started.set()
+                assert chinese_zero_started.wait(2)
+                return json.dumps(
+                    {
+                        "issues": [],
+                        "term_candidates": [{"source": "共通語", "target": "共同词"}],
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps({"issues": [], "term_candidates": []})
+        if system == CHINESE_READER_SYSTEM:
+            audited = next(item for item in payload["text"] if item["audit"])
+            if str(audited["id"]).startswith("ch0:"):
+                chinese_zero_started.set()
+                assert factual_one_started.wait(2)
+                return json.dumps(
+                    {
+                        "issues": [
+                            {
+                                "start_id": audited["id"],
+                                "end_id": audited["id"],
+                                "type": "unnatural",
+                                "detail": "check boundary",
+                                "evidence": "共同词",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps({"issues": []})
+        if system == CHINESE_FINDING_VALIDATION_SYSTEM:
+            preferred = payload["knowledge"].get("preferred_terms", [])
+            if not any(item.get("source") == "共通語" for item in preferred):
+                future_term_absent_from_previous.set()
+            finding = payload["reader_issues"][0]
+            return json.dumps(
+                {
+                    "results": [
+                        {
+                            "finding_id": finding["finding_id"],
+                            "safe_to_repair": False,
+                            "reason": "no repair",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        raise AssertionError(system)
+
+    fake = FakeClient(handler)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+    store = pipeline.run_parallel(source)
+
+    assert chinese_zero_started.is_set()
+    assert factual_one_started.is_set()
+    assert saw_provisional_context.is_set()
+    assert future_term_absent_from_previous.is_set()
+    assert [item["status"] for item in store.load_manifest()["chapters"]] == [
+        "done",
+        "done",
+    ]
+    assert any(term.source == "共通語" for term in pipeline.terminology.terms)
+    events = Path(store.event_log_path).read_text(encoding="utf-8")
+    assert "parallel_pair_started" in events
+    assert "parallel_pair_completed" in events
+
+
+def test_cli_exposes_one_stage_command_and_parallel_flag() -> None:
+    runner = CliRunner()
+    root = runner.invoke(app, ["--help"])
+    assert root.exit_code == 0
+    assert "stage" in root.output
+    assert "Run factual audit only" not in root.output
+    stage_help = runner.invoke(app, ["stage", "--help"])
+    assert stage_help.exit_code == 0
+    for stage in (
+        "translate",
+        "factual-audit",
+        "factual-repair",
+        "chinese-audit",
+        "chinese-repair",
+        "promote",
+    ):
+        assert stage in stage_help.output
+    translate_help = runner.invoke(app, ["translate", "--help"])
+    assert translate_help.exit_code == 0
+    assert "--parallel" in translate_help.output

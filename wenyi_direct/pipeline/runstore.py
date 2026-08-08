@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -48,6 +49,7 @@ class RunStore:
         self.run_dir = run_dir
         self.chapters_dir = os.path.join(run_dir, "chapters")
         self._batch_glossary_event_cache: dict[int, set[str]] | None = None
+        self._thread_lock = threading.RLock()
         if create:
             self.ensure_dirs()
 
@@ -259,38 +261,43 @@ class RunStore:
 
     def save_manifest(self, manifest: dict) -> None:
         """原子保存书籍清单和章节状态。"""
-        self._write_json(self.manifest_path, manifest)
+        with self._thread_lock:
+            self._write_json(self.manifest_path, manifest)
 
     def load_manifest(self) -> dict:
         """读取书籍清单和章节状态。"""
-        return self._read_json(self.manifest_path)
+        with self._thread_lock:
+            return self._read_json(self.manifest_path)
 
     def set_chapter_status(self, ci: int, status: str) -> None:
         """更新指定章节状态并原子保存整份 manifest。"""
-        manifest = self.load_manifest()
-        for c in manifest["chapters"]:
-            if c["index"] == ci:
-                c["status"] = status
-                break
-        self.save_manifest(manifest)
+        with self._thread_lock:
+            manifest = self.load_manifest()
+            for c in manifest["chapters"]:
+                if c["index"] == ci:
+                    c["status"] = status
+                    break
+            self.save_manifest(manifest)
 
     def set_chapter_review_status(self, ci: int, status: str) -> None:
         """更新指定章节的独立审校状态并原子保存 manifest。"""
-        manifest = self.load_manifest()
-        for chapter in manifest["chapters"]:
-            if chapter["index"] == ci:
-                chapter["review_status"] = status
-                break
-        self.save_manifest(manifest)
+        with self._thread_lock:
+            manifest = self.load_manifest()
+            for chapter in manifest["chapters"]:
+                if chapter["index"] == ci:
+                    chapter["review_status"] = status
+                    break
+            self.save_manifest(manifest)
 
     def set_chapter_fields(self, ci: int, **fields: Any) -> None:
         """Atomically update arbitrary observable chapter pipeline fields."""
-        manifest = self.load_manifest()
-        for chapter in manifest["chapters"]:
-            if chapter["index"] == ci:
-                chapter.update(fields)
-                break
-        self.save_manifest(manifest)
+        with self._thread_lock:
+            manifest = self.load_manifest()
+            for chapter in manifest["chapters"]:
+                if chapter["index"] == ci:
+                    chapter.update(fields)
+                    break
+            self.save_manifest(manifest)
 
     def pending_chapters(self) -> list[int]:
         """返回尚未标记完成的章节索引。"""
@@ -323,9 +330,10 @@ class RunStore:
             **payload,
         }
         path = self.audit_artifact_path(chapter)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as file:
-            file.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        with self._thread_lock:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as file:
+                file.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
     # ── 上下文 / 分析 / 报告 ──────────────────────────────────────────────
     def save_context(self, data: dict) -> None:
@@ -372,8 +380,9 @@ class RunStore:
         digest = hashlib.sha256(encoded).hexdigest()
         relative = os.path.join("artifacts", "inputs", f"{digest}.json")
         path = os.path.join(self.run_dir, relative)
-        if not os.path.isfile(path):
-            self._write_json(path, data)
+        with self._thread_lock:
+            if not os.path.isfile(path):
+                self._write_json(path, data)
         return {"path": relative.replace("\\", "/"), "sha256": digest}
 
     def record_translation_stage(
@@ -416,9 +425,10 @@ class RunStore:
             "segments": segments,
         }
         path = self.translation_artifact_path(chapter)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as file:
-            file.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        with self._thread_lock:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as file:
+                file.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
         relative = os.path.relpath(path, self.run_dir).replace("\\", "/")
         return {"path": relative, "record_id": record_id}
 
@@ -501,17 +511,18 @@ class RunStore:
             "event": event,
             **data,
         }
-        with open(self.event_log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-        if event == "batch_glossary_extracted" and self._batch_glossary_event_cache is not None:
-            chapter = data.get("chapter")
-            start = data.get("start_index")
-            count = data.get("count")
-            if (
-                isinstance(chapter, int)
-                and isinstance(start, int)
-                and isinstance(count, int)
-            ):
-                self._batch_glossary_event_cache.setdefault(chapter, set()).add(
-                    self.batch_glossary_key(start, count)
-                )
+        with self._thread_lock:
+            with open(self.event_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+            if event == "batch_glossary_extracted" and self._batch_glossary_event_cache is not None:
+                chapter = data.get("chapter")
+                start = data.get("start_index")
+                count = data.get("count")
+                if (
+                    isinstance(chapter, int)
+                    and isinstance(start, int)
+                    and isinstance(count, int)
+                ):
+                    self._batch_glossary_event_cache.setdefault(chapter, set()).add(
+                        self.batch_glossary_key(start, count)
+                    )

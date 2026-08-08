@@ -31,3 +31,8 @@ strong direct translation -> factual audit/repair -> Chinese-only audit
 
 The pipeline uses fresh calls for task and information separation, not as a claim
 that multiple calls from one model are independent human reviewers.
+
+Parallel execution is a cross-chapter schedule, not a different quality path: chapter
+N downstream Chinese review may overlap chapter N+1 translation and factual audit.
+The next chapter may read N's completed factual snapshot as provisional past context;
+future terminology remains inactive until N reaches Formal.
