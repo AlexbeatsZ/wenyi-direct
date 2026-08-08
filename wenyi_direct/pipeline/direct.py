@@ -171,6 +171,37 @@ class DirectPipeline:
                     self._save_usage(store)
         return store
 
+    def review_formal(
+        self,
+        source_path: str | Path,
+        *,
+        chapters: set[int] | None = None,
+        parallel: bool = False,
+        force: bool = False,
+    ) -> RunStore:
+        """Re-audit accepted Formal text without direct translation."""
+        store = self.prepare(source_path)
+        with store.lock():
+            selected = self._formal_review_chapters(store, chapters, force=force)
+            if not selected:
+                return store
+            self._allow_provisional_factual_context = parallel
+            try:
+                if parallel:
+                    for contiguous in self._contiguous_runs(selected):
+                        self._run_formal_review_parallel_sequence(store, contiguous)
+                else:
+                    for chapter_index in selected:
+                        self._ensure_formal_review_shadow(store, chapter_index)
+                        try:
+                            self._run_chapter(store, chapter_index)
+                        finally:
+                            self._save_usage(store)
+            finally:
+                self._allow_provisional_factual_context = False
+                self._save_usage(store)
+        return store
+
     def run_stage(
         self,
         source_path: str | Path,
@@ -277,6 +308,138 @@ class DirectPipeline:
             self._save_usage(store)
             previous = current
         self._run_downstream(store, previous)
+
+    def _run_formal_review_parallel_sequence(
+        self, store: RunStore, chapters: list[int]
+    ) -> None:
+        self._ensure_formal_review_shadow(store, chapters[0])
+        self._run_upstream(store, chapters[0], include_repair=True)
+        previous = chapters[0]
+        for current in chapters[1:]:
+            self._ensure_formal_review_shadow(store, current)
+            store.log_event(
+                "formal_review_parallel_pair_started",
+                downstream_chapter=previous,
+                upstream_chapter=current,
+            )
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                downstream = executor.submit(self._run_downstream, store, previous)
+                upstream = executor.submit(
+                    self._run_upstream, store, current, include_repair=False, defer_terms=True
+                )
+                downstream.result()
+                upstream.result()
+            self._run_upstream(store, current, include_repair=True)
+            store.log_event(
+                "formal_review_parallel_pair_completed",
+                downstream_chapter=previous,
+                upstream_chapter=current,
+            )
+            self._save_usage(store)
+            previous = current
+        self._run_downstream(store, previous)
+
+    def _formal_review_chapters(
+        self,
+        store: RunStore,
+        chapters: set[int] | None,
+        *,
+        force: bool,
+    ) -> list[int]:
+        manifest = store.load_manifest()
+        rows = {int(item["index"]): item for item in manifest["chapters"]}
+        selected = set(rows) if chapters is None else set(chapters)
+        unknown = selected - set(rows)
+        if unknown:
+            raise ValueError(f"unknown chapter indexes: {sorted(unknown)}")
+        result: list[int] = []
+        for chapter_index in sorted(selected):
+            row = rows[chapter_index]
+            shadow = store.load_shadow(chapter_index)
+            marker = shadow.get("formal_review") if shadow else None
+            phase = shadow.get("phase") if shadow else None
+            if row.get("status") == STATUS_DONE:
+                if marker and phase == "done" and not force:
+                    continue
+                if shadow and phase not in {None, "done"}:
+                    raise StageTaskError(
+                        f"chapter {chapter_index} has an unfinished non-review Shadow"
+                    )
+                result.append(chapter_index)
+                continue
+            if marker and phase == "done":
+                store.set_chapter_fields(chapter_index, status=STATUS_DONE, task="", error=None)
+                continue
+            if marker:
+                if force:
+                    raise StageTaskError(
+                        f"chapter {chapter_index} already has an unfinished Formal review"
+                    )
+                result.append(chapter_index)
+                continue
+            raise StageTaskError(
+                f"chapter {chapter_index} is not Formal and cannot be re-reviewed"
+            )
+        return result
+
+    def _ensure_formal_review_shadow(self, store: RunStore, chapter_index: int) -> None:
+        manifest = store.load_manifest()
+        row = next(item for item in manifest["chapters"] if item["index"] == chapter_index)
+        existing = store.load_shadow(chapter_index)
+        if row.get("status") != STATUS_DONE:
+            if existing and existing.get("formal_review"):
+                return
+            raise StageTaskError(f"chapter {chapter_index} has no resumable Formal review")
+
+        chapter = store.load_chapter(chapter_index)
+        targets = {segment.index: segment.target or "" for segment in chapter.segments}
+        missing = [
+            segment.index
+            for segment in chapter.text_segments
+            if not targets.get(segment.index, "").strip()
+        ]
+        if missing:
+            raise AlignmentError(
+                f"cannot review Formal chapter with empty targets: {missing}"
+            )
+        baseline = json.dumps(targets, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        shadow = {
+            "schema": 2,
+            "chapter": chapter_index,
+            "source_digest": chapter_source_digest(chapter),
+            "phase": "factual_audit",
+            "targets": {str(index): target for index, target in targets.items()},
+            "translated_ids": sorted(
+                segment_id(chapter.index, segment) for segment in chapter.text_segments
+            ),
+            "stage_snapshots": {
+                "direct": {str(index): target for index, target in targets.items()}
+            },
+            "formal_review": {
+                "schema": 1,
+                "baseline_sha256": hashlib.sha256(baseline).hexdigest(),
+            },
+        }
+        self._archive_targets(
+            store,
+            chapter,
+            "formal_review_baseline",
+            targets,
+            metadata=shadow["formal_review"],
+        )
+        self._save_shadow(store, chapter_index, shadow)
+        store.set_chapter_fields(
+            chapter_index,
+            status="pending",
+            phase="factual_audit",
+            task="factual-audit",
+            error=None,
+        )
+        store.log_event(
+            "formal_review_opened",
+            chapter=chapter_index,
+            baseline_sha256=shadow["formal_review"]["baseline_sha256"],
+        )
 
     def _run_upstream(
         self,

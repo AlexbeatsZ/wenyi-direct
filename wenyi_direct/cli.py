@@ -95,6 +95,41 @@ def translate(
 
 
 @app.command()
+def review(
+    source: Path = typer.Argument(..., exists=True, dir_okay=False),
+    config: Path = typer.Option(Path("config.yaml"), "--config", "-c", exists=True),
+    chapters: str | None = typer.Option(
+        None,
+        help="Optional indexes/ranges. Default reviews every not-yet-reviewed Formal chapter.",
+    ),
+    parallel: bool = typer.Option(
+        True,
+        "--parallel/--sequential",
+        help="Overlap Chinese review of chapter N with factual review of chapter N+1.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Open a new review generation even when Formal was reviewed already.",
+    ),
+) -> None:
+    """Re-audit existing Formal text through factual and Chinese-reader gates."""
+    cfg = _load(config)
+    clients = build_clients(cfg)
+    pipeline = DirectPipeline(cfg, clients, config_dir=config.resolve().parent)
+    try:
+        store = pipeline.review_formal(
+            source,
+            chapters=_parse_chapters(chapters),
+            parallel=parallel,
+            force=force,
+        )
+    except (StageTaskError, ValueError) as error:
+        raise typer.BadParameter(str(error)) from error
+    _print_status(store)
+
+
+@app.command()
 def stage(
     name: str = typer.Argument(
         ..., help=f"One of: {', '.join(STAGE_NAMES)}."

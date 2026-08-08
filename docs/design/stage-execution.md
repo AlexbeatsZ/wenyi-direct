@@ -18,6 +18,22 @@ prerequisites. `DirectPipeline.run()` advances by repeatedly calling that same s
 dispatcher. The CLI therefore needs only `stage <name>` for granular work and
 `translate` for composition; stage logic is not copied into command handlers.
 
+## Re-auditing existing Formal text
+
+`review` copies the current Formal targets into a new Shadow and starts at
+`factual-audit`; it never calls the direct-translation role. Formal remains the
+rollback baseline and changes only at the ordinary atomic `promote` gate.
+
+```powershell
+uv run wenyi-direct review book.epub --config config.yaml --parallel
+```
+
+Audit windows, source validations, repair regions, and the Formal baseline are
+persisted, so repeating the same command resumes an interruption. Completed review
+generations are skipped unless `--force` opens another generation. Chapters reopen
+just before execution rather than all at once, preserving prior Formal context and
+keeping later chapters formally complete until their turn.
+
 Audit and repair are separate checkpoints. Re-running an unfinished audit reuses
 completed windows and validations. Repair regions have stable persisted IDs, so a
 crash resumes after accepted regions instead of repeating them.

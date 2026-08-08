@@ -567,6 +567,46 @@ def test_each_stage_stops_at_its_declared_boundary(tmp_path: Path) -> None:
         pipeline.run_stage(source, "translate", chapters={0})
 
 
+def test_formal_review_uses_existing_text_and_dual_lane_without_retranslation(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    config = _config(tmp_path)
+    fake = FakeClient(_handler)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+    pipeline.run(source)
+    fake.calls.clear()
+
+    reviewed = pipeline.review_formal(source, parallel=True)
+
+    stages = [call["stage"] for call in fake.calls]
+    assert "direct_translation" not in stages
+    assert "factual_audit" in stages
+    assert "chinese_reader_audit" in stages
+    assert all(
+        item["status"] == "done" for item in reviewed.load_manifest()["chapters"]
+    )
+    assert all(
+        reviewed.load_shadow(index)["formal_review"]["baseline_sha256"]
+        for index in (0, 1)
+    )
+    events = [
+        json.loads(line)
+        for line in Path(reviewed.event_log_path).read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(row["event"] == "formal_review_opened" for row in events)
+    assert any(
+        row["event"] == "formal_review_parallel_pair_started" for row in events
+    )
+
+    calls_after_review = len(fake.calls)
+    pipeline.review_formal(source, parallel=True)
+    assert len(fake.calls) == calls_after_review
+
+
 def test_parallel_pipeline_really_overlaps_and_defers_future_terms(tmp_path: Path) -> None:
     source = tmp_path / "parallel.json"
     source.write_text(

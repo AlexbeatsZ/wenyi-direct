@@ -53,6 +53,7 @@ uv run wenyi-direct stage factual-repair path\to\book.epub --chapters 0-3 --conf
 uv run wenyi-direct stage chinese-audit path\to\book.epub --chapters 0-3 --config config.yaml
 uv run wenyi-direct stage chinese-repair path\to\book.epub --chapters 0-3 --config config.yaml
 uv run wenyi-direct stage promote path\to\book.epub --chapters 0-3 --config config.yaml
+uv run wenyi-direct review path\to\book.epub --parallel --config config.yaml
 ```
 
 For normal end-to-end work, `translate --parallel` uses two real model lanes: chapter
@@ -65,6 +66,11 @@ The single `stage <name>` command replaces the earlier standalone factual-only
 `audit` command and avoids six duplicated CLI handlers. See
 [docs/design/stage-execution.md](docs/design/stage-execution.md) for checkpoint,
 locking, and information-boundary details.
+
+`review` starts a fresh, resumable factual and Chinese-reader pass from existing
+Formal text without translating it again. Its default dual-lane mode overlaps
+chapter N downstream review with chapter N+1 factual review; `--sequential` disables
+that overlap.
 
 ## Quick start
 
