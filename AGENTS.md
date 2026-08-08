@@ -12,6 +12,8 @@ or atomic Formal promotion.
   parallel orchestration share its stage dispatcher.
 - CLI granular execution is `stage <name>`; end-to-end two-lane execution is
   `translate --parallel`.
+- Existing Formal text can be re-audited without retranslation through resumable
+  `review --parallel`; completed review generations require `--force` to reopen.
 - Detailed scheduling and concurrency rules: `docs/design/stage-execution.md`.
 
 ## Active Work
@@ -73,3 +75,6 @@ promotion to the final text.
 - Do not reintroduce a provider-wide Agy process lock: per-call temporary cwd plus
   `--new-project` is the isolation boundary, and a global lock makes two-lane mode
   silently sequential when all roles share one provider.
+- Agy 1.1 on Windows may briefly retain its per-call cwd after returning success.
+  Blank `request.txt` before cleanup and ignore only the residual directory-lock
+  error; never convert a valid paid response into a pipeline failure.

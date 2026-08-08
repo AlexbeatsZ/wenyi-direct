@@ -6,8 +6,9 @@ import os
 import re
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from ...config import LLMConfig, TierConfig
 from ..base import ContentPolicyError, LLMClient, Messages
@@ -57,6 +58,27 @@ _JSON_REQUIREMENT = (
     "Return only one valid JSON value matching the requested schema. "
     "Do not use Markdown fences or add explanatory text."
 )
+
+
+@contextmanager
+def _temporary_request() -> Iterator[tuple[str, Path]]:
+    """Keep Windows Agy child-process directory locks from failing a paid call.
+
+    Agy 1.1 can return before a short-lived child releases its working directory.
+    The request is blanked first, and Python may leave only an empty directory for
+    the OS to release later instead of turning a valid model response into failure.
+    """
+    with tempfile.TemporaryDirectory(
+        prefix="wenyi-direct-agy-", ignore_cleanup_errors=True
+    ) as request_dir:
+        request_path = Path(request_dir) / _REQUEST_FILE_NAME
+        try:
+            yield request_dir, request_path
+        finally:
+            try:
+                request_path.write_text("", encoding="utf-8")
+            except OSError:
+                pass
 
 
 def format_agy_prompt(messages: Messages, *, json_mode: bool = False) -> str:
@@ -181,8 +203,7 @@ class AgyClient(LLMClient):
             else _model_candidates(model)
         )
         try:
-            with tempfile.TemporaryDirectory(prefix="wenyi-direct-agy-") as request_dir:
-                request_path = Path(request_dir) / _REQUEST_FILE_NAME
+            with _temporary_request() as (request_dir, request_path):
                 request_path.write_text(prompt, encoding="utf-8", newline="\n")
                 completed = False
                 for index, candidate in enumerate(candidates):
