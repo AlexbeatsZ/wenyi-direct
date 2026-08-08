@@ -78,3 +78,6 @@ promotion to the final text.
 - Agy 1.1 on Windows may briefly retain its per-call cwd after returning success.
   Blank `request.txt` before cleanup and ignore only the residual directory-lock
   error; never convert a valid paid response into a pipeline failure.
+- Legacy Formal states may lack `source_sha256`. Backfill it only after reparsing the
+  current source and matching every chapter/segment index, source, kind, and anchor;
+  never bypass the source-change guard with a blind manifest edit.

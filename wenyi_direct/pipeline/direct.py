@@ -128,7 +128,12 @@ class DirectPipeline:
                 raise ValueError(
                     f"state belongs to another source: {manifest['source_path']}"
                 )
-            if manifest.get("source_sha256") != source_sha256:
+            recorded_sha256 = manifest.get("source_sha256")
+            if not recorded_sha256:
+                self._migrate_legacy_source_sha256(
+                    store, manifest, source, source_sha256
+                )
+            elif recorded_sha256 != source_sha256:
                 raise RuntimeError(
                     "source file changed after state creation; create a new state or "
                     "explicitly migrate the source instead of resuming stale segments"
@@ -150,6 +155,62 @@ class DirectPipeline:
         self._activate_terminology_for(store)
         store.log_event("prepared", chapters=len(document.chapters), source_path=source)
         return store
+
+    def _migrate_legacy_source_sha256(
+        self,
+        store: RunStore,
+        manifest: dict[str, Any],
+        source: str,
+        source_sha256: str,
+    ) -> None:
+        """Backfill a missing digest only after a complete structural comparison."""
+        document = load_document(
+            source,
+            self.config.source_lang,
+            self.config.target_lang,
+            self.config.segment.max_chars_per_segment,
+            cache_dir=store.source_dir,
+        )
+        manifest_rows = list(manifest.get("chapters", []))
+        if len(document.chapters) != len(manifest_rows):
+            raise RuntimeError(
+                "legacy state has no source digest and chapter count differs; "
+                "explicit source migration is required"
+            )
+        for fresh, row in zip(document.chapters, manifest_rows):
+            chapter_index = int(row["index"])
+            stored = store.load_chapter(chapter_index)
+            if (
+                fresh.index != chapter_index
+                or fresh.title != stored.title
+                or fresh.href != stored.href
+                or len(fresh.segments) != len(stored.segments)
+            ):
+                raise RuntimeError(
+                    "legacy state has no source digest and chapter structure differs "
+                    f"at chapter {chapter_index}; explicit source migration is required"
+                )
+            fresh_segments = [
+                (segment.index, segment.source, segment.kind, segment.anchor)
+                for segment in fresh.segments
+            ]
+            stored_segments = [
+                (segment.index, segment.source, segment.kind, segment.anchor)
+                for segment in stored.segments
+            ]
+            if fresh_segments != stored_segments:
+                raise RuntimeError(
+                    "legacy state has no source digest and segment structure differs "
+                    f"at chapter {chapter_index}; explicit source migration is required"
+                )
+        manifest["source_sha256"] = source_sha256
+        store.save_manifest(manifest)
+        store.log_event(
+            "legacy_source_digest_migrated",
+            source_path=source,
+            source_sha256=source_sha256,
+            chapters=len(document.chapters),
+        )
 
     def run(
         self,

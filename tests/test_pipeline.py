@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from pathlib import Path
@@ -522,6 +523,43 @@ def test_resume_rejects_changed_source_file(tmp_path: Path) -> None:
     pipeline.prepare(source)
     source.write_text(source.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="source file changed"):
+        pipeline.prepare(source)
+
+
+def test_legacy_state_backfills_missing_source_digest_after_full_match(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    pipeline = DirectPipeline(_config(tmp_path), {}, config_dir=tmp_path)
+    store = pipeline.prepare(source)
+    manifest = store.load_manifest()
+    manifest.pop("source_sha256")
+    store.save_manifest(manifest)
+
+    pipeline.prepare(source)
+
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert store.load_manifest()["source_sha256"] == expected
+    events = Path(store.event_log_path).read_text(encoding="utf-8")
+    assert "legacy_source_digest_migrated" in events
+
+
+def test_legacy_state_without_digest_rejects_changed_segment_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    pipeline = DirectPipeline(_config(tmp_path), {}, config_dir=tmp_path)
+    store = pipeline.prepare(source)
+    manifest = store.load_manifest()
+    manifest.pop("source_sha256")
+    store.save_manifest(manifest)
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload["chapters"][0]["segments"][0]["source"] = "別の原文。"
+    source.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="segment structure differs"):
         pipeline.prepare(source)
 
 

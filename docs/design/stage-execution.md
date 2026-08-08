@@ -34,6 +34,12 @@ generations are skipped unless `--force` opens another generation. Chapters reop
 just before execution rather than all at once, preserving prior Formal context and
 keeping later chapters formally complete until their turn.
 
+Legacy states created before `source_sha256` was persisted may enter review only
+after Wenyi Direct reparses the source and matches every chapter and segment's index,
+source text, kind, and anchor. A complete match backfills the digest once; any
+structural difference remains blocked as an explicit migration instead of silently
+attaching Formal text to a different source.
+
 Audit and repair are separate checkpoints. Re-running an unfinished audit reuses
 completed windows and validations. Repair regions have stable persisted IDs, so a
 crash resumes after accepted regions instead of repeating them.
