@@ -93,3 +93,20 @@ owned by one chapter lane at a time.
 A worker failure is propagated at the join. Completed windows, audit results, repair
 regions, and Shadow targets are already persisted, so the next invocation resumes
 through the same stage dispatcher. Formal text changes only in `promote`.
+
+## CLI progress and live audit records
+
+`DirectPipeline` emits transport-neutral progress events from the shared stage
+dispatcher and from its window/repair loops. The CLI renders one book-level chapter
+bar plus one active row per chapter, so dual-lane execution exposes both workers
+instead of looking sequential. Callback delivery is serialized because two worker
+threads may finish model calls simultaneously; this serialization covers display
+only and does not lock provider calls.
+
+Audits and repair validation additionally emit one-line JSON records as soon as a
+result has been parsed and accepted into pipeline state. Records include chapter,
+stage, event type, stable IDs and issue details. Repair records include the original
+issues, proposed before/after text, and the fidelity verdict. These are projections
+of already persisted results, not extra model calls or prompt contents. In particular,
+the Chinese Reader still receives Chinese reader-visible text only; its later
+source-aware validation is reported as a separate event.

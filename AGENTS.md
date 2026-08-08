@@ -14,11 +14,15 @@ or atomic Formal promotion.
   `translate --parallel`.
 - Existing Formal text can be re-audited without retranslation through resumable
   `review --parallel`; completed review generations require `--force` to reopen.
+- Long-running CLI commands show overall and per-lane progress, and stream parsed
+  audit, repair proposal, and validation results as one-line JSON records.
 - Detailed scheduling and concurrency rules: `docs/design/stage-execution.md`.
 
 ## Active Work
 
 - Granular stages and true two-thread chapter staggering are implemented.
+- Shared progress events and live audit JSON are implemented for sequential,
+  two-lane, Formal-review, and independent-stage execution.
 - The abandoned `agent/stage-commands-and-staggered-pipeline` branch is not the
   canonical implementation and must not be merged wholesale.
 
@@ -67,6 +71,10 @@ promotion to the final text.
   keep `LICENSE` and provenance in the README.
 
 ## Durable Lessons
+
+- Progress callbacks in two-lane mode must serialize only display delivery. Reusing
+  the stage dispatcher keeps sequential and parallel output consistent, while a
+  provider-wide lock would destroy actual overlap.
 
 - `[active | Formal review migration | verified 2026-08-09]` A completed Formal chapter can coexist with a schema-1 translation Shadow left by an earlier run. Formal review must archive such a Shadow under `artifacts/superseded_shadows/` and seed its new review Shadow from Formal; treating the legacy candidate as resumable review state blocks valid re-audits, while silently overwriting it loses forensic state.
 

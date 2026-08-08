@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import threading
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from wenyi_direct.assemble.writer import assemble
@@ -20,6 +22,7 @@ from wenyi_direct.pipeline.direct import (
     export_json,
 )
 from wenyi_direct.pipeline.types import segment_id
+from wenyi_direct.progress import ProgressEvent, RichProgressDisplay
 from wenyi_direct.prompts import (
     CHINESE_FINDING_VALIDATION_SYSTEM,
     CHINESE_READER_SYSTEM,
@@ -256,7 +259,13 @@ def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) ->
     config = _config(tmp_path)
     fake = FakeClient(_handler)
     clients = {role: fake for role in config.roles.model_dump()}
-    pipeline = DirectPipeline(config, clients, config_dir=tmp_path)
+    progress_events: list[ProgressEvent] = []
+    pipeline = DirectPipeline(
+        config,
+        clients,
+        config_dir=tmp_path,
+        on_progress=progress_events.append,
+    )
 
     store = pipeline.run(source, chapters={0})
     chapter = store.load_chapter(0)
@@ -275,6 +284,30 @@ def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) ->
     assert discovered.valid_from == 0
     assert not (tmp_path / "terminology.yaml").exists()
     assert (Path(store.run_dir) / "terminology.yaml").exists()
+
+    assert any(
+        event.kind == "stage_progress"
+        and event.stage == "factual-audit"
+        and event.completed == event.total
+        for event in progress_events
+    )
+    audit_events = [event for event in progress_events if event.kind == "audit_log"]
+    assert {event.detail for event in audit_events} >= {
+        "factual_audit_result",
+        "chinese_reader_result",
+        "chinese_finding_validation",
+        "repair_proposal",
+        "repair_validation",
+        "repair_accepted",
+    }
+    factual_log = next(
+        event for event in audit_events if event.detail == "factual_audit_result"
+    )
+    assert factual_log.payload is not None
+    assert factual_log.payload["issues"][0]["start_id"].startswith("ch0:s1:")
+    proposal_log = next(event for event in audit_events if event.detail == "repair_proposal")
+    assert proposal_log.payload is not None
+    assert proposal_log.payload["changes"][0]["before"] != proposal_log.payload["changes"][0]["after"]
 
     chinese_calls = [
         call for call in fake.calls if call["messages"][0]["content"] == CHINESE_READER_SYSTEM
@@ -498,6 +531,8 @@ def test_cli_prepare_and_status_need_no_model_credentials(tmp_path: Path) -> Non
     runner = CliRunner()
     prepared = runner.invoke(app, ["prepare", str(source), "--config", str(config_path)])
     assert prepared.exit_code == 0, prepared.output
+    assert "解析并校验源文件" in prepared.output
+    assert "解析完成，共 2 章" in prepared.output
     status = runner.invoke(app, ["status", str(source), "--config", str(config_path)])
     assert status.exit_code == 0, status.output
     assert "0/2 formal chapters complete" in status.output
@@ -774,8 +809,12 @@ def test_parallel_pipeline_really_overlaps_and_defers_future_terms(tmp_path: Pat
         raise AssertionError(system)
 
     fake = FakeClient(handler)
+    progress_events: list[ProgressEvent] = []
     pipeline = DirectPipeline(
-        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+        config,
+        {role: fake for role in config.roles.model_dump()},
+        config_dir=tmp_path,
+        on_progress=progress_events.append,
     )
     store = pipeline.run_parallel(source)
 
@@ -791,6 +830,15 @@ def test_parallel_pipeline_really_overlaps_and_defers_future_terms(tmp_path: Pat
     events = Path(store.event_log_path).read_text(encoding="utf-8")
     assert "parallel_pair_started" in events
     assert "parallel_pair_completed" in events
+    assert any(
+        event.kind == "operation_started"
+        and event.operation == "translate-parallel"
+        and event.chapters == (0, 1)
+        for event in progress_events
+    )
+    assert {
+        event.chapter for event in progress_events if event.kind == "chapter_completed"
+    } == {0, 1}
 
 
 def test_cli_exposes_one_stage_command_and_parallel_flag() -> None:
@@ -813,3 +861,43 @@ def test_cli_exposes_one_stage_command_and_parallel_flag() -> None:
     translate_help = runner.invoke(app, ["translate", "--help"])
     assert translate_help.exit_code == 0
     assert "--parallel" in translate_help.output
+
+
+def test_rich_progress_renders_audit_json_without_breaking_live_tasks() -> None:
+    output = io.StringIO()
+    display = RichProgressDisplay(
+        Console(file=output, force_terminal=False, color_system=None, width=300)
+    )
+
+    with display:
+        display(ProgressEvent("prepare_started", detail="book.json"))
+        display(ProgressEvent("prepare_completed", total=1, detail="解析完成，共 1 章"))
+        display(ProgressEvent("operation_started", operation="translate", chapters=(0,)))
+        display(ProgressEvent("stage_started", chapter=0, stage="factual-audit"))
+        display(
+            ProgressEvent(
+                "stage_progress",
+                chapter=0,
+                stage="factual-audit",
+                completed=1,
+                total=2,
+                detail="批次 1/2",
+            )
+        )
+        display(
+            ProgressEvent(
+                "audit_log",
+                chapter=0,
+                stage="factual-audit",
+                detail="factual_audit_result",
+                payload={"issues": [{"detail": "语义错误"}]},
+            )
+        )
+        display(ProgressEvent("stage_completed", chapter=0, stage="factual-audit"))
+        display(ProgressEvent("chapter_completed", chapter=0))
+        display(ProgressEvent("operation_completed", operation="translate"))
+
+    rendered = output.getvalue()
+    assert '"event": "factual_audit_result"' in rendered
+    assert '"detail": "语义错误"' in rendered
+    assert "1/1" in rendered

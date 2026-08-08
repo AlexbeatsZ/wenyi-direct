@@ -14,6 +14,7 @@ from .llm.factory import build_clients
 from .pipeline.direct import STAGE_NAMES, DirectPipeline, StageTaskError, export_json
 from .pipeline.knowledge import TerminologyStore, TermRule
 from .pipeline.runstore import STATUS_DONE, RunStore, slugify
+from .progress import RichProgressDisplay
 from .validate import validate_epub
 
 app = typer.Typer(no_args_is_help=True, help="Chapter-first literary translation.")
@@ -63,8 +64,11 @@ def prepare(
 ) -> None:
     """Parse the source and create resumable state without calling a model."""
     cfg = _load(config)
-    pipeline = DirectPipeline(cfg, {}, config_dir=config.resolve().parent)
-    store = pipeline.prepare(source)
+    with RichProgressDisplay(console) as progress:
+        pipeline = DirectPipeline(
+            cfg, {}, config_dir=config.resolve().parent, on_progress=progress
+        )
+        store = pipeline.prepare(source)
     console.print(store.run_dir)
 
 
@@ -84,13 +88,16 @@ def translate(
     """Resume direct translation and all configured quality gates."""
     cfg = _load(config)
     clients = build_clients(cfg)
-    pipeline = DirectPipeline(cfg, clients, config_dir=config.resolve().parent)
     selected = _parse_chapters(chapters)
-    store = (
-        pipeline.run_parallel(source, chapters=selected)
-        if parallel
-        else pipeline.run(source, chapters=selected)
-    )
+    with RichProgressDisplay(console) as progress:
+        pipeline = DirectPipeline(
+            cfg, clients, config_dir=config.resolve().parent, on_progress=progress
+        )
+        store = (
+            pipeline.run_parallel(source, chapters=selected)
+            if parallel
+            else pipeline.run(source, chapters=selected)
+        )
     _print_status(store)
 
 
@@ -116,14 +123,17 @@ def review(
     """Re-audit existing Formal text through factual and Chinese-reader gates."""
     cfg = _load(config)
     clients = build_clients(cfg)
-    pipeline = DirectPipeline(cfg, clients, config_dir=config.resolve().parent)
     try:
-        store = pipeline.review_formal(
-            source,
-            chapters=_parse_chapters(chapters),
-            parallel=parallel,
-            force=force,
-        )
+        with RichProgressDisplay(console) as progress:
+            pipeline = DirectPipeline(
+                cfg, clients, config_dir=config.resolve().parent, on_progress=progress
+            )
+            store = pipeline.review_formal(
+                source,
+                chapters=_parse_chapters(chapters),
+                parallel=parallel,
+                force=force,
+            )
     except (StageTaskError, ValueError) as error:
         raise typer.BadParameter(str(error)) from error
     _print_status(store)
@@ -144,9 +154,12 @@ def stage(
     """Run one persisted pipeline stage without continuing into later stages."""
     cfg = _load(config)
     clients = build_clients(cfg)
-    pipeline = DirectPipeline(cfg, clients, config_dir=config.resolve().parent)
     try:
-        store = pipeline.run_stage(source, name, chapters=_parse_chapters(chapters))
+        with RichProgressDisplay(console) as progress:
+            pipeline = DirectPipeline(
+                cfg, clients, config_dir=config.resolve().parent, on_progress=progress
+            )
+            store = pipeline.run_stage(source, name, chapters=_parse_chapters(chapters))
     except (StageTaskError, ValueError) as error:
         raise typer.BadParameter(str(error), param_hint="name") from error
     _print_status(store)
@@ -236,19 +249,20 @@ def assemble(
         out_root = config.resolve().parent / out_root
     extension = {"markdown": "md"}.get(format, format)
     output = output or (out_root / f"{source.stem}.zh.{extension}")
-    if format == "json":
-        result = export_json(store, output)
-    else:
-        result = assemble_document(
-            store,
-            str(source.resolve()),
-            str(output.resolve()),
-            out_format=format,
-            bilingual=cfg.output.bilingual if bilingual is None else bilingual,
-            order=cfg.output.bilingual_order,
-            preserve_source_style=cfg.output.bilingual_preserve_source_style,
-            about_page=cfg.output.about_page,
-        )
+    with console.status(f"[cyan]正在组装 {format} 输出…"):
+        if format == "json":
+            result = export_json(store, output)
+        else:
+            result = assemble_document(
+                store,
+                str(source.resolve()),
+                str(output.resolve()),
+                out_format=format,
+                bilingual=cfg.output.bilingual if bilingual is None else bilingual,
+                order=cfg.output.bilingual_order,
+                preserve_source_style=cfg.output.bilingual_preserve_source_style,
+                about_page=cfg.output.about_page,
+            )
     console.print(result)
     if format == "epub":
         console.print(validate_epub(result))

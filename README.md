@@ -67,6 +67,16 @@ The single `stage <name>` command replaces the earlier standalone factual-only
 [docs/design/stage-execution.md](docs/design/stage-execution.md) for checkpoint,
 locking, and information-boundary details.
 
+All long-running commands render live source/overall/chapter-stage progress. During
+AI audits and repairs they also print one JSON object per completed result, including
+stable segment IDs, issue details, repair suggestions or before/after changes, and
+source-fidelity validation. The same output is available for sequential, parallel,
+Formal-review, and independent-stage runs; no separate verbose command is required.
+
+```json
+{"chapter":0,"data":{"issues":[{"start_id":"ch0:s12:...","detail":"人物动作叙述过度书面"}]},"event":"chinese_reader_result","stage":"chinese-audit"}
+```
+
 `review` starts a fresh, resumable factual and Chinese-reader pass from existing
 Formal text without translating it again. Its default dual-lane mode overlaps
 chapter N downstream review with chapter N+1 factual review; `--sequential` disables

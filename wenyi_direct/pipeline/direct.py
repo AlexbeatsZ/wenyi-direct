@@ -16,6 +16,7 @@ from ..ingest.models import Chapter
 from ..ingest.segmenter import load_document
 from ..llm.base import LLMClient
 from ..llm.json_parser import JSONParseError
+from ..progress import ProgressCallback, ProgressEvent
 from ..prompts import (
     CHINESE_FINDING_VALIDATION_SYSTEM,
     CHINESE_READER_SYSTEM,
@@ -80,6 +81,7 @@ class DirectPipeline:
         clients: dict[str, LLMClient],
         *,
         config_dir: str | Path = ".",
+        on_progress: ProgressCallback | None = None,
     ) -> None:
         self.config = config
         self.clients = clients
@@ -94,6 +96,46 @@ class DirectPipeline:
         self._run_terminologies: dict[str, TerminologyStore] = {}
         self._terminology_lock = threading.RLock()
         self._allow_provisional_factual_context = False
+        self._on_progress = on_progress
+        self._progress_lock = threading.RLock()
+
+    def _emit_progress(self, kind: str, **data: Any) -> None:
+        if self._on_progress is None:
+            return
+        with self._progress_lock:
+            self._on_progress(ProgressEvent(kind=kind, **data))
+
+    def _stage_progress(
+        self,
+        chapter: int,
+        stage: str,
+        completed: int,
+        total: int,
+        detail: str,
+    ) -> None:
+        self._emit_progress(
+            "stage_progress",
+            chapter=chapter,
+            stage=stage,
+            completed=completed,
+            total=total,
+            detail=detail,
+        )
+
+    def _audit_log(
+        self,
+        chapter: int,
+        stage: str,
+        event: str,
+        payload: dict[str, Any],
+    ) -> None:
+        self._emit_progress(
+            "audit_log",
+            chapter=chapter,
+            stage=stage,
+            detail=event,
+            payload=payload,
+        )
 
     def _activate_terminology_for(self, store: RunStore) -> None:
         """Keep model discoveries inside one book's state, never in shared config."""
@@ -119,6 +161,9 @@ class DirectPipeline:
 
     def prepare(self, source_path: str | Path) -> RunStore:
         source = str(Path(source_path).resolve())
+        self._emit_progress(
+            "prepare_started", detail=Path(source).name
+        )
         source_sha256 = hashlib.sha256(Path(source).read_bytes()).hexdigest()
         store = self.store_for(source)
         if store.exists():
@@ -139,6 +184,11 @@ class DirectPipeline:
                     "explicitly migrate the source instead of resuming stale segments"
                 )
             self._activate_terminology_for(store)
+            self._emit_progress(
+                "prepare_completed",
+                total=len(manifest["chapters"]),
+                detail=f"恢复 {len(manifest['chapters'])} 章状态",
+            )
             return store
         document = load_document(
             source,
@@ -154,6 +204,11 @@ class DirectPipeline:
         store.save_manifest(manifest)
         self._activate_terminology_for(store)
         store.log_event("prepared", chapters=len(document.chapters), source_path=source)
+        self._emit_progress(
+            "prepare_completed",
+            total=len(document.chapters),
+            detail=f"解析完成，共 {len(document.chapters)} 章",
+        )
         return store
 
     def _migrate_legacy_source_sha256(
@@ -223,13 +278,18 @@ class DirectPipeline:
             pending = store.pending_chapters()
             if chapters is not None:
                 pending = [index for index in pending if index in chapters]
+            self._emit_progress(
+                "operation_started", operation="translate", chapters=tuple(pending)
+            )
             for chapter_index in pending:
                 try:
                     self._run_chapter(store, chapter_index)
+                    self._emit_progress("chapter_completed", chapter=chapter_index)
                 finally:
                     # Keep the live monitor useful during long books and retain
                     # provider/fallback evidence even when a chapter fails.
                     self._save_usage(store)
+            self._emit_progress("operation_completed", operation="translate")
         return store
 
     def review_formal(
@@ -244,7 +304,12 @@ class DirectPipeline:
         store = self.prepare(source_path)
         with store.lock():
             selected = self._formal_review_chapters(store, chapters, force=force)
+            operation = "review-parallel" if parallel else "review"
+            self._emit_progress(
+                "operation_started", operation=operation, chapters=tuple(selected)
+            )
             if not selected:
+                self._emit_progress("operation_completed", operation=operation)
                 return store
             self._allow_provisional_factual_context = parallel
             try:
@@ -256,11 +321,13 @@ class DirectPipeline:
                         self._ensure_formal_review_shadow(store, chapter_index)
                         try:
                             self._run_chapter(store, chapter_index)
+                            self._emit_progress("chapter_completed", chapter=chapter_index)
                         finally:
                             self._save_usage(store)
             finally:
                 self._allow_provisional_factual_context = False
                 self._save_usage(store)
+            self._emit_progress("operation_completed", operation=operation)
         return store
 
     def run_stage(
@@ -281,11 +348,16 @@ class DirectPipeline:
                     for index in selected
                     if self._stage_is_ready(store, index, stage)
                 ]
+            self._emit_progress(
+                "operation_started", operation="stage", chapters=tuple(selected)
+            )
             for chapter_index in selected:
                 try:
                     self._run_stage_for_chapter(store, chapter_index, stage)
+                    self._emit_progress("chapter_completed", chapter=chapter_index)
                 finally:
                     self._save_usage(store)
+            self._emit_progress("operation_completed", operation="stage")
         return store
 
     def run_parallel(
@@ -298,7 +370,15 @@ class DirectPipeline:
         store = self.prepare(source_path)
         with store.lock():
             selected = self._selected_chapters(store, chapters, pending_only=True)
+            self._emit_progress(
+                "operation_started",
+                operation="translate-parallel",
+                chapters=tuple(selected),
+            )
             if not selected:
+                self._emit_progress(
+                    "operation_completed", operation="translate-parallel"
+                )
                 return store
             self._allow_provisional_factual_context = True
             try:
@@ -307,6 +387,9 @@ class DirectPipeline:
             finally:
                 self._allow_provisional_factual_context = False
                 self._save_usage(store)
+            self._emit_progress(
+                "operation_completed", operation="translate-parallel"
+            )
         return store
 
     @staticmethod
@@ -546,6 +629,7 @@ class DirectPipeline:
                 self._run_stage_for_chapter(store, chapter_index, stage)
                 continue
             if stage == "done":
+                self._emit_progress("chapter_completed", chapter=chapter_index)
                 return
             raise StageTaskError(
                 f"chapter {chapter_index} is not ready for downstream work: {stage}"
@@ -671,6 +755,12 @@ class DirectPipeline:
             error=None,
         )
         store.log_event("stage_started", chapter=chapter_index, stage=stage)
+        self._emit_progress(
+            "stage_started",
+            chapter=chapter_index,
+            stage=stage,
+            detail="准备模型请求",
+        )
         try:
             if stage == "translate":
                 self._translate_chapter(store, chapter, shadow)
@@ -697,6 +787,12 @@ class DirectPipeline:
                 stage=stage,
                 error=str(exc),
             )
+            self._emit_progress(
+                "stage_failed",
+                chapter=chapter_index,
+                stage=stage,
+                error=str(exc),
+            )
             raise
         next_stage = self._next_stage(shadow)
         store.set_chapter_fields(
@@ -707,6 +803,9 @@ class DirectPipeline:
         )
         store.log_event(
             "stage_completed", chapter=chapter_index, stage=stage, next_stage=next_stage
+        )
+        self._emit_progress(
+            "stage_completed", chapter=chapter_index, stage=stage, detail=next_stage
         )
 
     @staticmethod
@@ -769,7 +868,22 @@ class DirectPipeline:
         self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
     ) -> None:
         completed = set(shadow.get("translated_ids", []))
-        for planned in self.window_planner.plan(chapter):
+        plan = list(self.window_planner.plan(chapter))
+        completed_windows = sum(
+            all(
+                segment_id(chapter.index, chapter.segments[index]) in completed
+                for index in planned.write_indexes
+            )
+            for planned in plan
+        )
+        self._stage_progress(
+            chapter.index,
+            "translate",
+            completed_windows,
+            len(plan),
+            "检查可恢复翻译窗口",
+        )
+        for window_index, planned in enumerate(plan, start=1):
             missing = tuple(
                 index
                 for index in planned.write_indexes
@@ -777,6 +891,12 @@ class DirectPipeline:
             )
             if not missing:
                 continue
+            self._emit_progress(
+                "stage_activity",
+                chapter=chapter.index,
+                stage="translate",
+                detail=f"翻译窗口 {window_index}/{len(plan)}，段落 {missing[0]}–{missing[-1]}",
+            )
             window = TranslationWindow(planned.read_indexes, missing)
             translated = self._translate_window(store, chapter, window)
             targets = self._targets(shadow)
@@ -787,6 +907,14 @@ class DirectPipeline:
             )
             shadow["translated_ids"] = sorted(completed)
             self._save_shadow(store, chapter.index, shadow)
+            completed_windows += 1
+            self._stage_progress(
+                chapter.index,
+                "translate",
+                completed_windows,
+                len(plan),
+                f"窗口 {window_index}/{len(plan)} 已保存",
+            )
         expected = {
             segment_id(chapter.index, segment) for segment in chapter.text_segments
         }
@@ -877,6 +1005,14 @@ class DirectPipeline:
             state["completed_repair_regions"] = []
             self._save_shadow(store, chapter.index, shadow)
         audit_batches = state.setdefault("audit_batches", {})
+        completed_batches = sum(str(index) in audit_batches for index in range(len(plan)))
+        self._stage_progress(
+            chapter.index,
+            "factual-audit",
+            completed_batches,
+            len(plan),
+            "检查可恢复审校批次",
+        )
         for batch_index, item in enumerate(plan):
             key = str(batch_index)
             if key in audit_batches:
@@ -894,6 +1030,12 @@ class DirectPipeline:
             )
             input_ref = store.save_translation_input(
                 {"stage": "factual_audit", "messages": messages}
+            )
+            self._emit_progress(
+                "stage_activity",
+                chapter=chapter.index,
+                stage="factual-audit",
+                detail=f"AI 审核批次 {batch_index + 1}/{len(plan)}",
             )
             response = self.clients["factual_audit"].complete_json(
                 messages,
@@ -941,7 +1083,27 @@ class DirectPipeline:
                     "added_terms": [term.model_dump(exclude_none=True) for term in added_terms],
                 },
             )
+            self._audit_log(
+                chapter.index,
+                "factual-audit",
+                "factual_audit_result",
+                {
+                    "batch": batch_index,
+                    "read_indexes": list(window.read_indexes),
+                    "write_indexes": list(window.write_indexes),
+                    "issues": parsed,
+                    "term_candidates": discoveries,
+                },
+            )
             self._save_shadow(store, chapter.index, shadow)
+            completed_batches += 1
+            self._stage_progress(
+                chapter.index,
+                "factual-audit",
+                completed_batches,
+                len(plan),
+                f"批次 {batch_index + 1}/{len(plan)}，发现 {len(parsed)} 个问题",
+            )
         state["audit_complete"] = True
         self._save_shadow(store, chapter.index, shadow)
 
@@ -1011,7 +1173,15 @@ class DirectPipeline:
             ]
             self._save_shadow(store, chapter.index, shadow)
         completed = set(state.setdefault("completed_repair_regions", []))
-        for item in state["repair_regions"]:
+        repair_regions = state["repair_regions"]
+        self._stage_progress(
+            chapter.index,
+            "factual-repair",
+            sum(str(item["id"]) in completed for item in repair_regions),
+            len(repair_regions),
+            f"共 {len(repair_regions)} 个事实修复范围",
+        )
+        for region_index, item in enumerate(repair_regions, start=1):
             region_id = str(item["id"])
             if region_id in completed:
                 continue
@@ -1023,6 +1193,13 @@ class DirectPipeline:
             completed.add(region_id)
             state["completed_repair_regions"] = sorted(completed)
             self._save_shadow(store, chapter.index, shadow)
+            self._stage_progress(
+                chapter.index,
+                "factual-repair",
+                len(completed),
+                len(repair_regions),
+                f"修复范围 {region_index}/{len(repair_regions)} 已通过验证",
+            )
         shadow.setdefault("stage_snapshots", {})["factual"] = dict(shadow["targets"])
         shadow["phase"] = (
             "chinese_audit" if self.config.pipeline.chinese_reader_audit else "promote"
@@ -1042,12 +1219,26 @@ class DirectPipeline:
                 segment.index: len(targets.get(segment.index, ""))
                 for segment in chapter.text_segments
             }
-            for window in self.window_planner.plan(chapter, reader_lengths):
+            reader_plan = list(self.window_planner.plan(chapter, reader_lengths))
+            self._stage_progress(
+                chapter.index,
+                "chinese-audit",
+                0,
+                len(reader_plan),
+                "准备中文纯文本阅读审校",
+            )
+            for batch_index, window in enumerate(reader_plan):
                 messages = chinese_reader_messages(
                     chapter, targets, window.read_indexes, window.write_indexes
                 )
                 input_ref = store.save_translation_input(
                     {"stage": "chinese_reader_audit", "messages": messages}
+                )
+                self._emit_progress(
+                    "stage_activity",
+                    chapter=chapter.index,
+                    stage="chinese-audit",
+                    detail=f"AI 中文阅读批次 {batch_index + 1}/{len(reader_plan)}",
                 )
                 response = self.clients["chinese_audit"].complete_json(
                     messages,
@@ -1072,10 +1263,41 @@ class DirectPipeline:
                     "chinese_reader_audit",
                     {"input_ref": input_ref, "issues": parsed},
                 )
+                self._audit_log(
+                    chapter.index,
+                    "chinese-audit",
+                    "chinese_reader_result",
+                    {
+                        "batch": batch_index,
+                        "read_indexes": list(window.read_indexes),
+                        "write_indexes": list(window.write_indexes),
+                        "issues": parsed,
+                    },
+                )
                 state["reader_batches"] = stored_reader
                 self._save_shadow(store, chapter.index, shadow)
+                self._stage_progress(
+                    chapter.index,
+                    "chinese-audit",
+                    batch_index + 1,
+                    len(reader_plan),
+                    f"阅读批次 {batch_index + 1}/{len(reader_plan)}，发现 {len(parsed)} 个问题",
+                )
         stored_validations = state.setdefault("validation_batches", {})
         accepted_batches: list[tuple[int, list[dict[str, Any]]]] = []
+        validation_indexes = [
+            index for index, item in enumerate(stored_reader) if item.get("issues")
+        ]
+        completed_validations = sum(
+            str(index) in stored_validations for index in validation_indexes
+        )
+        self._stage_progress(
+            chapter.index,
+            "chinese-audit",
+            completed_validations,
+            len(validation_indexes),
+            f"源文验证 {len(validation_indexes)} 个问题批次",
+        )
         for batch_index, item in enumerate(stored_reader):
             window = TranslationWindow(
                 tuple(item["read_indexes"]), tuple(item["write_indexes"])
@@ -1104,6 +1326,12 @@ class DirectPipeline:
                 input_ref = store.save_translation_input(
                     {"stage": "chinese_finding_validation", "messages": messages}
                 )
+                self._emit_progress(
+                    "stage_activity",
+                    chapter=chapter.index,
+                    stage="chinese-audit",
+                    detail=f"源文验证阅读发现，批次 {batch_index + 1}",
+                )
                 response = self.clients["validation"].complete_json(
                     messages,
                     tier=self.config.pipeline.validation_tier,
@@ -1122,8 +1350,22 @@ class DirectPipeline:
                             "result": result,
                         },
                     )
+                    self._audit_log(
+                        chapter.index,
+                        "chinese-audit",
+                        "chinese_finding_validation",
+                        {"reader_issue": issue, "result": result},
+                    )
                 stored_validations[key] = results
                 self._save_shadow(store, chapter.index, shadow)
+                completed_validations += 1
+                self._stage_progress(
+                    chapter.index,
+                    "chinese-audit",
+                    completed_validations,
+                    len(validation_indexes),
+                    f"问题批次 {completed_validations}/{len(validation_indexes)} 已验证",
+                )
             batch_accepted = [result for result in results if result["safe_to_repair"]]
             if batch_accepted:
                 accepted_batches.append((batch_index, batch_accepted))
@@ -1174,7 +1416,15 @@ class DirectPipeline:
         targets = self._targets(shadow)
         state = shadow["chinese_state"]
         completed = set(state.setdefault("completed_repair_regions", []))
-        for item in state.get("repair_regions", []):
+        repair_regions = state.get("repair_regions", [])
+        self._stage_progress(
+            chapter.index,
+            "chinese-repair",
+            sum(str(item["id"]) in completed for item in repair_regions),
+            len(repair_regions),
+            f"共 {len(repair_regions)} 个中文修复范围",
+        )
+        for region_index, item in enumerate(repair_regions, start=1):
             region_id = str(item["id"])
             if region_id in completed:
                 continue
@@ -1188,6 +1438,13 @@ class DirectPipeline:
                 completed.add(region_id)
                 state["completed_repair_regions"] = sorted(completed)
                 self._save_shadow(store, chapter.index, shadow)
+                self._stage_progress(
+                    chapter.index,
+                    "chinese-repair",
+                    len(completed),
+                    len(repair_regions),
+                    f"空范围 {region_index}/{len(repair_regions)} 已跳过",
+                )
                 continue
             targets = self._repair_and_validate(
                 store,
@@ -1204,6 +1461,13 @@ class DirectPipeline:
             completed.add(region_id)
             state["completed_repair_regions"] = sorted(completed)
             self._save_shadow(store, chapter.index, shadow)
+            self._stage_progress(
+                chapter.index,
+                "chinese-repair",
+                len(completed),
+                len(repair_regions),
+                f"修复范围 {region_index}/{len(repair_regions)} 已通过验证",
+            )
         shadow["phase"] = "promote"
         self._save_shadow(store, chapter.index, shadow)
         store.set_chapter_fields(chapter.index, phase="promote")
@@ -1229,8 +1493,21 @@ class DirectPipeline:
         )
         if not set(write_indexes).issubset(read_indexes):
             raise AlignmentError("repair write scope must be contained in visible read scope")
+        visible_stage = {
+            "factual_repair": "factual-repair",
+            "language_repair": "chinese-repair",
+            "terminology_repair": "promote",
+        }.get(stage, stage.replace("_", "-"))
         feedback: list[dict] = []
         for attempt in range(1, self.config.pipeline.max_repair_attempts + 1):
+            self._emit_progress(
+                "stage_activity",
+                chapter=chapter.index,
+                stage=visible_stage,
+                detail=(
+                    f"AI 修复第 {attempt} 次，段落 {write_indexes[0]}–{write_indexes[-1]}"
+                ),
+            )
             source = "\n".join(
                 chapter.segments[index].source for index in read_indexes
             )
@@ -1255,6 +1532,25 @@ class DirectPipeline:
             changes = self._parse_translations(chapter, write_indexes, response)
             proposed = dict(targets)
             proposed.update(changes)
+            proposal = [
+                {
+                    "id": segment_id(chapter.index, chapter.segments[index]),
+                    "index": index,
+                    "before": targets[index],
+                    "after": changes[index],
+                }
+                for index in write_indexes
+            ]
+            self._audit_log(
+                chapter.index,
+                visible_stage,
+                "repair_proposal",
+                {
+                    "attempt": attempt,
+                    "issues": list(region.issues),
+                    "changes": proposal,
+                },
+            )
             self._archive_targets(
                 store,
                 chapter,
@@ -1279,6 +1575,18 @@ class DirectPipeline:
                         "issues": feedback,
                         "write_indexes": list(write_indexes),
                         "validator": "hard_terminology",
+                    },
+                )
+                self._audit_log(
+                    chapter.index,
+                    visible_stage,
+                    "repair_validation",
+                    {
+                        "attempt": attempt,
+                        "valid": False,
+                        "validator": "hard_terminology",
+                        "issues": feedback,
+                        "write_indexes": list(write_indexes),
                     },
                 )
                 continue
@@ -1306,6 +1614,17 @@ class DirectPipeline:
                     "write_indexes": list(write_indexes),
                 },
             )
+            self._audit_log(
+                chapter.index,
+                visible_stage,
+                "repair_validation",
+                {
+                    "attempt": attempt,
+                    "valid": valid,
+                    "issues": feedback,
+                    "write_indexes": list(write_indexes),
+                },
+            )
             if valid:
                 self._archive_targets(
                     store,
@@ -1316,6 +1635,12 @@ class DirectPipeline:
                     input_ref=validation_ref,
                     metadata={"attempt": attempt},
                 )
+                self._audit_log(
+                    chapter.index,
+                    visible_stage,
+                    "repair_accepted",
+                    {"attempt": attempt, "changes": proposal},
+                )
                 return proposed
         raise RuntimeError(
             f"{stage} failed source-fidelity validation after "
@@ -1325,6 +1650,13 @@ class DirectPipeline:
     def _promote(
         self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
     ) -> None:
+        self._stage_progress(
+            chapter.index,
+            "promote",
+            0,
+            1,
+            "最终结构与术语检查",
+        )
         targets = self._targets(shadow)
         missing = [
             segment.index
@@ -1339,6 +1671,12 @@ class DirectPipeline:
             tuple(segment.index for segment in chapter.text_segments),
         )
         if term_issues:
+            self._audit_log(
+                chapter.index,
+                "promote",
+                "hard_terminology_findings",
+                {"issues": term_issues},
+            )
             for region in self.repair_planner.plan(term_issues, len(chapter.segments)):
                 targets = self._repair_and_validate(
                     store, chapter, targets, region, "terminology_repair"
@@ -1378,6 +1716,13 @@ class DirectPipeline:
             chinese_reader_audit=self.config.pipeline.chinese_reader_audit,
         )
         store.log_event("chapter_promoted", chapter=chapter.index)
+        self._stage_progress(
+            chapter.index,
+            "promote",
+            1,
+            1,
+            "Formal 已原子保存",
+        )
 
     def _parse_translations(
         self, chapter: Chapter, indexes: tuple[int, ...], response: Any
