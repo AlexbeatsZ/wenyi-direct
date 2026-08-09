@@ -15,6 +15,7 @@ from ...config import LLMConfig, TierConfig
 from ..base import ContentPolicyError, LLMClient, Messages, TransientProviderError
 from ..tiers import resolve_tier
 from ..usage import UsageSample
+from ._errors import is_explicit_timeout_error
 
 _ANSI_RE = re.compile(r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~])")
 _DEFAULT_TIERS = {
@@ -58,7 +59,6 @@ _TRANSIENT_CLI_ERROR_MARKERS = (
     "resource exhausted",
     "service unavailable",
     "temporarily unavailable",
-    "timeout waiting for response",
     "too many requests",
 )
 _ROLE_LABELS = {
@@ -172,7 +172,9 @@ def _is_content_policy_rejection(detail: str) -> bool:
 def _is_transient_cli_error(detail: str) -> bool:
     """Retry only failures that Agy reports as transient transport/runtime faults."""
     lowered = detail.casefold()
-    return any(marker in lowered for marker in _TRANSIENT_CLI_ERROR_MARKERS)
+    return is_explicit_timeout_error(detail) or any(
+        marker in lowered for marker in _TRANSIENT_CLI_ERROR_MARKERS
+    )
 
 
 class AgyClient(LLMClient):

@@ -96,8 +96,9 @@ promotion to the final text.
 - CLI `max_retries` is ineffective unless each CLI adapter consumes it. Classify
   only recognizable transient transport/runtime failures for retry/fallback;
   explicit CLI quota exhaustion and repeated malformed JSON may use the configured
-  fallback, while authentication, configuration, alignment, and quality failures
-  must remain visible.
+  fallback. Every explicit timeout, including a headless authentication timeout,
+  must receive bounded retries; authentication failures without a timeout plus
+  configuration, alignment, and quality failures must remain visible.
 - Persist a repair proposal in Shadow before fidelity validation and mark an
   accepted proposal before returning it to the caller. Otherwise a validator or
   process interruption repeats an already paid repair call on resume.

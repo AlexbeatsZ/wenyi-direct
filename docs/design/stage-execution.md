@@ -105,7 +105,9 @@ to `max_retries`. If those retries are exhausted and
 `roles.content_policy_fallback` is configured, the same request is sent to that
 fallback. Explicit CLI quota exhaustion and repeated malformed JSON also route to
 the fallback only after primary retries are exhausted. Permanent authentication,
-configuration, alignment, and quality-gate failures remain explicit errors.
+configuration, alignment, and quality-gate failures remain explicit errors. An
+explicit timeout is always transient, including authentication flows that time out;
+an authentication failure without a timeout remains permanent.
 
 Promotion uses the persisted `done` Shadow as its commit marker. If the process exits
 after the Formal chapter and done Shadow are saved but before the manifest status is

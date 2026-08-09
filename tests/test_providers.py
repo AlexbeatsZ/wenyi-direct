@@ -48,7 +48,18 @@ def test_codex_cli_is_ephemeral_read_only_and_ignores_rules(tmp_path, monkeypatc
     assert captured["input"].endswith("explanatory text.")
 
 
-def test_codex_cli_retries_transient_transport_failure(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "failure_detail",
+    (
+        "stream disconnected before completion",
+        "request timeout",
+        "context deadline exceeded",
+        "请求超时",
+    ),
+)
+def test_codex_cli_retries_transient_transport_failure(
+    tmp_path, monkeypatch, failure_detail
+) -> None:
     calls = 0
     delays = []
 
@@ -56,9 +67,7 @@ def test_codex_cli_retries_transient_transport_failure(tmp_path, monkeypatch) ->
         nonlocal calls
         calls += 1
         if calls == 1:
-            return subprocess.CompletedProcess(
-                args, 1, stdout="", stderr="stream disconnected before completion"
-            )
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr=failure_detail)
         return subprocess.CompletedProcess(args, 0, stdout='{"ok":true}', stderr="")
 
     monkeypatch.setattr("wenyi_direct.llm.providers.codex_cli.subprocess.run", fake_run)
@@ -178,6 +187,79 @@ def test_agy_retries_transient_eligibility_eof(tmp_path, monkeypatch) -> None:
     assert client.complete([{"role": "user", "content": "hello"}]) == '{"ok":true}'
     assert calls == 2
     assert delays == [1]
+
+
+@pytest.mark.parametrize(
+    "failure_detail",
+    (
+        "Error: authentication failed or timed out",
+        "Error: request timeout",
+        "rpc error: context deadline exceeded",
+        "Error: 认证超时",
+    ),
+)
+def test_agy_retries_any_reported_timeout(
+    tmp_path, monkeypatch, failure_detail
+) -> None:
+    calls = 0
+    delays = []
+
+    def fake_run(args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr=failure_detail)
+        return subprocess.CompletedProcess(args, 0, stdout='{"ok":true}', stderr="")
+
+    monkeypatch.setattr("wenyi_direct.llm.providers.agy.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "wenyi_direct.llm.providers.agy.time.sleep", lambda delay: delays.append(delay)
+    )
+    client = AgyClient(
+        LLMConfig(
+            provider="agy",
+            cwd=str(tmp_path),
+            max_retries=3,
+            tiers={"strong": TierConfig(model="gemini-3.6-flash-high")},
+        )
+    )
+
+    assert client.complete([{"role": "user", "content": "hello"}]) == '{"ok":true}'
+    assert calls == 2
+    assert delays == [1]
+
+
+def test_agy_authentication_timeout_retries_are_bounded(tmp_path, monkeypatch) -> None:
+    calls = 0
+    delays = []
+
+    def fake_run(args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            stdout="",
+            stderr="Error: authentication failed or timed out",
+        )
+
+    monkeypatch.setattr("wenyi_direct.llm.providers.agy.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "wenyi_direct.llm.providers.agy.time.sleep", lambda delay: delays.append(delay)
+    )
+    client = AgyClient(
+        LLMConfig(
+            provider="agy",
+            cwd=str(tmp_path),
+            max_retries=2,
+            tiers={"strong": TierConfig(model="gemini-3.6-flash-high")},
+        )
+    )
+
+    with pytest.raises(TransientProviderError, match="authentication failed"):
+        client.complete([{"role": "user", "content": "hello"}])
+    assert calls == 3
+    assert delays == [1, 2]
 
 
 def test_agy_does_not_retry_permanent_cli_failure(tmp_path, monkeypatch) -> None:

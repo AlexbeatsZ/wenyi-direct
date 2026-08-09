@@ -11,6 +11,7 @@ from ...config import LLMConfig, TierConfig
 from ..base import LLMClient, Messages, TransientProviderError
 from ..tiers import resolve_tier
 from ..usage import UsageSample
+from ._errors import is_explicit_timeout_error
 
 _DEFAULT_TIERS = {
     "strong": TierConfig(model="gpt-5.6-sol", options={"reasoning_effort": "high"}),
@@ -39,8 +40,6 @@ _TRANSIENT_CLI_ERROR_MARKERS = (
     "service unavailable",
     "stream disconnected",
     "temporarily unavailable",
-    "timed out",
-    "timeout",
     "too many requests",
 )
 
@@ -71,7 +70,9 @@ def _estimate_tokens(text: str) -> int:
 
 def _is_transient_cli_error(detail: str) -> bool:
     lowered = detail.casefold()
-    return any(marker in lowered for marker in _TRANSIENT_CLI_ERROR_MARKERS)
+    return is_explicit_timeout_error(detail) or any(
+        marker in lowered for marker in _TRANSIENT_CLI_ERROR_MARKERS
+    )
 
 
 class CodexCLIClient(LLMClient):
