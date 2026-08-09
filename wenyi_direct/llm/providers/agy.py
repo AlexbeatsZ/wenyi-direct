@@ -6,12 +6,13 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
 from ...config import LLMConfig, TierConfig
-from ..base import ContentPolicyError, LLMClient, Messages
+from ..base import ContentPolicyError, LLMClient, Messages, TransientProviderError
 from ..tiers import resolve_tier
 from ..usage import UsageSample
 
@@ -41,6 +42,25 @@ _DISPLAY_NAME_TO_MODEL = {
 }
 _SHORT_ID_ATTEMPTS = 2
 _TEXT_RESPONSE_ATTEMPTS = 3
+_TRANSIENT_CLI_ERROR_MARKERS = (
+    "connection aborted",
+    "connection refused",
+    "connection reset",
+    "context canceled",
+    "eof",
+    "http status 429",
+    "http status 500",
+    "http status 502",
+    "http status 503",
+    "http status 504",
+    "quota exceeded",
+    "rate limit",
+    "resource exhausted",
+    "service unavailable",
+    "temporarily unavailable",
+    "timeout waiting for response",
+    "too many requests",
+)
 _ROLE_LABELS = {
     "system": "System",
     "user": "User",
@@ -149,6 +169,12 @@ def _is_content_policy_rejection(detail: str) -> bool:
     )
 
 
+def _is_transient_cli_error(detail: str) -> bool:
+    """Retry only failures that Agy reports as transient transport/runtime faults."""
+    lowered = detail.casefold()
+    return any(marker in lowered for marker in _TRANSIENT_CLI_ERROR_MARKERS)
+
+
 class AgyClient(LLMClient):
     """每次以全新 ``agy --print`` 调用执行请求的 CLI provider。"""
 
@@ -173,6 +199,7 @@ class AgyClient(LLMClient):
                 self.env["USERPROFILE"] = str(isolated_home)
                 self.env["LOCALAPPDATA"] = str(isolated_local_app_data)
         self.timeout = max(1, int(cfg.timeout))
+        self.max_retries = max(0, int(cfg.max_retries))
         self.tiers = {**_DEFAULT_TIERS, **cfg.tiers}
         self._resolved_models: dict[str, str] = {}
 
@@ -236,20 +263,34 @@ class AgyClient(LLMClient):
                                 "--print",
                                 request_instruction,
                             ]
-                            result = subprocess.run(
-                                args,
-                                cwd=request_dir,
-                                env=self.env,
-                                capture_output=True,
-                                text=True,
-                                encoding="utf-8",
-                                errors="replace",
-                                timeout=self.timeout + 5,
-                                check=False,
-                            )
-                            stdout = _strip_ansi(result.stdout or "")
-                            stderr = _strip_ansi(result.stderr or "")
-                            detail = stderr or stdout or "无错误输出"
+                            for retry in range(self.max_retries + 1):
+                                try:
+                                    result = subprocess.run(
+                                        args,
+                                        cwd=request_dir,
+                                        env=self.env,
+                                        capture_output=True,
+                                        text=True,
+                                        encoding="utf-8",
+                                        errors="replace",
+                                        timeout=self.timeout + 5,
+                                        check=False,
+                                    )
+                                except subprocess.TimeoutExpired:
+                                    if retry >= self.max_retries:
+                                        raise
+                                    time.sleep(min(2**retry, 8))
+                                    continue
+                                stdout = _strip_ansi(result.stdout or "")
+                                stderr = _strip_ansi(result.stderr or "")
+                                detail = stderr or stdout or "无错误输出"
+                                if (
+                                    result.returncode == 0
+                                    or retry >= self.max_retries
+                                    or not _is_transient_cli_error(detail)
+                                ):
+                                    break
+                                time.sleep(min(2**retry, 8))
                             if result.returncode == 0:
                                 if _is_content_policy_rejection(detail):
                                     if response_attempt + 1 < _TEXT_RESPONSE_ATTEMPTS:
@@ -260,9 +301,15 @@ class AgyClient(LLMClient):
                                 if _is_tool_permission_denial(detail):
                                     if response_attempt + 1 < _TEXT_RESPONSE_ATTEMPTS:
                                         continue
-                                    raise RuntimeError(
+                                    raise TransientProviderError(
                                         "agy CLI 连续把纯文本任务误判为工具调用；"
-                                        "已拒绝授权并停止"
+                                        "已拒绝授权并耗尽同供应商重试"
+                                    )
+                                if not stdout and not stderr:
+                                    if response_attempt + 1 < _TEXT_RESPONSE_ATTEMPTS:
+                                        continue
+                                    raise TransientProviderError(
+                                        "agy CLI 连续成功退出但未返回任何响应文本"
                                     )
                                 self._resolved_models[model_key] = candidate
                                 completed = True
@@ -276,9 +323,12 @@ class AgyClient(LLMClient):
                         has_fallback = index + 1 < len(candidates)
                         if unknown_model and has_fallback:
                             break
-                        raise RuntimeError(
-                            f"agy CLI 退出码 {result.returncode}：{detail}"
+                        error_type = (
+                            TransientProviderError
+                            if _is_transient_cli_error(detail)
+                            else RuntimeError
                         )
+                        raise error_type(f"agy CLI 退出码 {result.returncode}：{detail}")
                     if completed:
                         break
         except FileNotFoundError as exc:
@@ -291,10 +341,17 @@ class AgyClient(LLMClient):
                 f"找不到 agy CLI：{self.command!r}；请先安装并确认其位于 PATH"
             ) from exc
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"agy CLI 调用在 {self.timeout} 秒后超时") from exc
+            raise TransientProviderError(
+                f"agy CLI 调用在 {self.timeout} 秒后超时，且已耗尽重试"
+            ) from exc
 
         if result.returncode != 0:
-            raise RuntimeError(f"agy CLI 退出码 {result.returncode}：{detail}")
+            error_type = (
+                TransientProviderError
+                if _is_transient_cli_error(detail)
+                else RuntimeError
+            )
+            raise error_type(f"agy CLI 退出码 {result.returncode}：{detail}")
 
         text = stdout or stderr
         self.usage.record(

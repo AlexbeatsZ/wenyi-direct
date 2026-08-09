@@ -37,7 +37,8 @@ roles:
   chinese_audit: sol
   repair: sol
   validation: sol
-  # Optional: used only after an explicit provider content-policy refusal.
+  # Optional: used after an explicit content-policy refusal, exhausted recognized
+  # transient/unavailable CLI failures, or repeated invalid JSON responses.
   # content_policy_fallback: api
 
 window:

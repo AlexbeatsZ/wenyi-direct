@@ -22,6 +22,10 @@ class ContentPolicyError(RuntimeError):
     """Provider 明确拒绝了包含敏感内容的请求。"""
 
 
+class TransientProviderError(RuntimeError):
+    """Provider retries were exhausted for a likely temporary transport fault."""
+
+
 class LLMClient(ABC):
     """所有 provider 实现此接口。"""
 

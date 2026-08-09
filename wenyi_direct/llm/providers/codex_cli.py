@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
 from ...config import LLMConfig, TierConfig
-from ..base import LLMClient, Messages
+from ..base import LLMClient, Messages, TransientProviderError
 from ..tiers import resolve_tier
 from ..usage import UsageSample
 
@@ -22,6 +23,26 @@ _ROLE_LABELS = {
     "assistant": "Previous assistant response",
     "tool": "Tool result",
 }
+_TRANSIENT_CLI_ERROR_MARKERS = (
+    "429",
+    "502",
+    "503",
+    "504",
+    "connection aborted",
+    "connection refused",
+    "connection reset",
+    "error sending request",
+    "internal server error",
+    "quota exceeded",
+    "rate limit",
+    "resource exhausted",
+    "service unavailable",
+    "stream disconnected",
+    "temporarily unavailable",
+    "timed out",
+    "timeout",
+    "too many requests",
+)
 
 
 def format_codex_prompt(messages: Messages, *, json_mode: bool = False) -> str:
@@ -48,6 +69,11 @@ def _estimate_tokens(text: str) -> int:
     return max(1, round(len(text) / 4)) if text else 0
 
 
+def _is_transient_cli_error(detail: str) -> bool:
+    lowered = detail.casefold()
+    return any(marker in lowered for marker in _TRANSIENT_CLI_ERROR_MARKERS)
+
+
 class CodexCLIClient(LLMClient):
     """Launch an ephemeral, read-only Codex agent for each review request."""
 
@@ -58,6 +84,7 @@ class CodexCLIClient(LLMClient):
         if not Path(self.cwd).is_dir():
             raise ValueError(f"codex-cli provider 的 cwd 不是现有目录：{self.cwd}")
         self.timeout = max(1, int(cfg.timeout))
+        self.max_retries = max(0, int(cfg.max_retries))
         self.tiers = {**_DEFAULT_TIERS, **cfg.tiers}
 
     def complete(
@@ -99,31 +126,55 @@ class CodexCLIClient(LLMClient):
             "-",
         ]
         try:
-            result = subprocess.run(
-                args,
-                cwd=self.cwd,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self.timeout,
-                check=False,
-            )
+            for retry in range(self.max_retries + 1):
+                try:
+                    result = subprocess.run(
+                        args,
+                        cwd=self.cwd,
+                        input=prompt,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=self.timeout,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    if retry >= self.max_retries:
+                        raise
+                    time.sleep(min(2**retry, 8))
+                    continue
+                stdout = (result.stdout or "").strip()
+                stderr = (result.stderr or "").strip()
+                detail = stderr or stdout or "无错误输出"
+                empty_success = result.returncode == 0 and not stdout
+                if (
+                    (result.returncode == 0 and not empty_success)
+                    or retry >= self.max_retries
+                    or (not empty_success and not _is_transient_cli_error(detail))
+                ):
+                    break
+                time.sleep(min(2**retry, 8))
         except FileNotFoundError as exc:
             raise RuntimeError(
                 f"找不到 Codex CLI：{self.command!r}；请先安装并确认其位于 PATH"
             ) from exc
         except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"Codex CLI 调用在 {self.timeout} 秒后超时") from exc
+            raise TransientProviderError(
+                f"Codex CLI 调用在 {self.timeout} 秒后超时，且已耗尽重试"
+            ) from exc
 
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
         if result.returncode != 0:
-            detail = stderr or stdout or "无错误输出"
-            raise RuntimeError(f"Codex CLI 退出码 {result.returncode}：{detail}")
+            error_type = (
+                TransientProviderError
+                if _is_transient_cli_error(detail)
+                else RuntimeError
+            )
+            raise error_type(f"Codex CLI 退出码 {result.returncode}：{detail}")
         if not stdout:
-            raise RuntimeError(f"Codex CLI 未返回审校文本：{stderr or '无错误输出'}")
+            raise TransientProviderError(
+                f"Codex CLI 耗尽重试后仍未返回审校文本：{stderr or '无错误输出'}"
+            )
 
         self.usage.record(
             tier,

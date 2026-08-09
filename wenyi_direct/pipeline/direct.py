@@ -861,6 +861,23 @@ class DirectPipeline:
     def _save_targets(shadow: dict[str, Any], targets: dict[int, str]) -> None:
         shadow["targets"] = {str(index): target for index, target in targets.items()}
 
+    @staticmethod
+    def _targets_sha256(targets: dict[int, str]) -> str:
+        payload = {str(index): targets[index] for index in sorted(targets)}
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _repair_checkpoint_id(stage: str, region: RepairRegion) -> str:
+        payload = {
+            "stage": stage,
+            "start": region.start,
+            "end": region.end,
+            "issues": list(region.issues),
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        return f"{stage}-{hashlib.sha256(encoded).hexdigest()[:16]}"
+
     def _policy_fingerprint(self) -> str:
         with self._terminology_lock:
             payload = {
@@ -1232,11 +1249,19 @@ class DirectPipeline:
                 continue
             region = RepairRegion(int(item["start"]), int(item["end"]), tuple(item["issues"]))
             targets = self._repair_and_validate(
-                store, chapter, targets, region, "factual_repair"
+                store,
+                chapter,
+                targets,
+                region,
+                "factual_repair",
+                shadow=shadow,
+                checkpoint_state=state,
+                checkpoint_id=region_id,
             )
             self._save_targets(shadow, targets)
             completed.add(region_id)
             state["completed_repair_regions"] = sorted(completed)
+            state.pop("pending_repair", None)
             self._save_shadow(store, chapter.index, shadow)
             self._stage_progress(
                 chapter.index,
@@ -1501,10 +1526,14 @@ class DirectPipeline:
                     chapter, write_indexes[0], write_indexes[-1], targets
                 ),
                 write_indexes=write_indexes,
+                shadow=shadow,
+                checkpoint_state=state,
+                checkpoint_id=region_id,
             )
             self._save_targets(shadow, targets)
             completed.add(region_id)
             state["completed_repair_regions"] = sorted(completed)
+            state.pop("pending_repair", None)
             self._save_shadow(store, chapter.index, shadow)
             self._stage_progress(
                 chapter.index,
@@ -1527,6 +1556,9 @@ class DirectPipeline:
         *,
         read_indexes: tuple[int, ...] | None = None,
         write_indexes: tuple[int, ...] | None = None,
+        shadow: dict[str, Any],
+        checkpoint_state: dict[str, Any],
+        checkpoint_id: str,
     ) -> dict[int, str]:
         write_indexes = write_indexes or tuple(
             index for index in region.indexes if chapter.segments[index].source.strip()
@@ -1543,8 +1575,101 @@ class DirectPipeline:
             "language_repair": "chinese-repair",
             "terminology_repair": "promote",
         }.get(stage, stage.replace("_", "-"))
+        base_targets_sha256 = self._targets_sha256(targets)
+
+        def save_checkpoint(
+            status: str,
+            attempt: int,
+            feedback: list[dict],
+            *,
+            changes: dict[int, str] | None = None,
+            input_ref: dict[str, str] | None = None,
+        ) -> None:
+            checkpoint: dict[str, Any] = {
+                "region_id": checkpoint_id,
+                "stage": stage,
+                "status": status,
+                "attempt": attempt,
+                "base_targets_sha256": base_targets_sha256,
+                "read_indexes": list(read_indexes),
+                "write_indexes": list(write_indexes),
+                "feedback": feedback,
+            }
+            if changes is not None:
+                checkpoint["changes"] = {
+                    str(index): value for index, value in changes.items()
+                }
+            if input_ref is not None:
+                checkpoint["input_ref"] = input_ref
+            checkpoint_state["pending_repair"] = checkpoint
+            self._save_shadow(store, chapter.index, shadow)
+
         feedback: list[dict] = []
-        for attempt in range(1, self.config.pipeline.max_repair_attempts + 1):
+        start_attempt = 1
+        resumed_changes: dict[int, str] | None = None
+        resumed_input_ref: dict[str, str] | None = None
+        resumed_status: str | None = None
+        pending = checkpoint_state.get("pending_repair")
+        if pending is not None:
+            expected = {
+                "region_id": checkpoint_id,
+                "stage": stage,
+                "base_targets_sha256": base_targets_sha256,
+                "read_indexes": list(read_indexes),
+                "write_indexes": list(write_indexes),
+            }
+            mismatched = [
+                key for key, value in expected.items() if pending.get(key) != value
+            ]
+            if mismatched:
+                raise StageTaskError(
+                    "persisted repair checkpoint does not match the current task: "
+                    f"{mismatched}"
+                )
+            resumed_status = str(pending.get("status", ""))
+            if resumed_status not in {"proposal", "retry", "accepted"}:
+                raise StageTaskError(
+                    f"persisted repair checkpoint has invalid status: {resumed_status!r}"
+                )
+            try:
+                start_attempt = int(pending["attempt"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise StageTaskError(
+                    "persisted repair checkpoint has an invalid attempt"
+                ) from exc
+            raw_feedback = pending.get("feedback", [])
+            if not isinstance(raw_feedback, list):
+                raise StageTaskError("persisted repair checkpoint feedback is not a list")
+            feedback = list(raw_feedback)
+            if (
+                resumed_status == "retry"
+                and start_attempt > self.config.pipeline.max_repair_attempts
+            ):
+                start_attempt = 1
+            if resumed_status in {"proposal", "accepted"}:
+                raw_changes = pending.get("changes")
+                if not isinstance(raw_changes, dict):
+                    raise StageTaskError(
+                        "persisted repair checkpoint changes are not an object"
+                    )
+                resumed_changes = {
+                    int(index): str(value) for index, value in raw_changes.items()
+                }
+                if set(resumed_changes) != set(write_indexes):
+                    raise StageTaskError(
+                        "persisted repair checkpoint changed IDs do not match write scope"
+                    )
+                raw_input_ref = pending.get("input_ref")
+                if isinstance(raw_input_ref, dict):
+                    resumed_input_ref = {
+                        str(key): str(value) for key, value in raw_input_ref.items()
+                    }
+                if resumed_status == "accepted":
+                    accepted = dict(targets)
+                    accepted.update(resumed_changes)
+                    return accepted
+
+        for attempt in range(start_attempt, self.config.pipeline.max_repair_attempts + 1):
             self._emit_progress(
                 "stage_activity",
                 chapter=chapter.index,
@@ -1557,24 +1682,34 @@ class DirectPipeline:
                 chapter.segments[index].source for index in read_indexes
             )
             knowledge = self._knowledge_for(store, chapter, source)
-            messages = repair_messages(
-                chapter,
-                targets,
-                read_indexes,
-                write_indexes,
-                region.issues,
-                knowledge,
-                feedback,
-            )
-            input_ref = store.save_translation_input(
-                {"stage": stage, "attempt": attempt, "messages": messages}
-            )
-            response = self.clients["repair"].complete_json(
-                messages,
-                tier=self.config.pipeline.repair_tier,
-                stage=stage,
-            )
-            changes = self._parse_translations(chapter, write_indexes, response)
+            input_ref: dict[str, str] | None
+            reused_proposal = False
+            if resumed_status == "proposal" and resumed_changes is not None:
+                changes = resumed_changes
+                input_ref = resumed_input_ref
+                reused_proposal = True
+                resumed_changes = None
+                resumed_input_ref = None
+                resumed_status = None
+            else:
+                messages = repair_messages(
+                    chapter,
+                    targets,
+                    read_indexes,
+                    write_indexes,
+                    region.issues,
+                    knowledge,
+                    feedback,
+                )
+                input_ref = store.save_translation_input(
+                    {"stage": stage, "attempt": attempt, "messages": messages}
+                )
+                response = self.clients["repair"].complete_json(
+                    messages,
+                    tier=self.config.pipeline.repair_tier,
+                    stage=stage,
+                )
+                changes = self._parse_translations(chapter, write_indexes, response)
             proposed = dict(targets)
             proposed.update(changes)
             proposal = [
@@ -1586,25 +1721,33 @@ class DirectPipeline:
                 }
                 for index in write_indexes
             ]
-            self._audit_log(
-                chapter.index,
-                visible_stage,
-                "repair_proposal",
-                {
-                    "attempt": attempt,
-                    "issues": list(region.issues),
-                    "changes": proposal,
-                },
-            )
-            self._archive_targets(
-                store,
-                chapter,
-                f"{stage}_proposal",
-                changes,
-                previous=targets,
-                input_ref=input_ref,
-                metadata={"attempt": attempt},
-            )
+            if not reused_proposal:
+                self._audit_log(
+                    chapter.index,
+                    visible_stage,
+                    "repair_proposal",
+                    {
+                        "attempt": attempt,
+                        "issues": list(region.issues),
+                        "changes": proposal,
+                    },
+                )
+                self._archive_targets(
+                    store,
+                    chapter,
+                    f"{stage}_proposal",
+                    changes,
+                    previous=targets,
+                    input_ref=input_ref,
+                    metadata={"attempt": attempt},
+                )
+                save_checkpoint(
+                    "proposal",
+                    attempt,
+                    feedback,
+                    changes=changes,
+                    input_ref=input_ref,
+                )
             term_feedback = self._terminology_issues(
                 chapter, proposed, write_indexes
             )
@@ -1634,6 +1777,7 @@ class DirectPipeline:
                         "write_indexes": list(write_indexes),
                     },
                 )
+                save_checkpoint("retry", attempt + 1, feedback)
                 continue
             validation_messages = fidelity_validation_messages(
                 chapter, proposed, read_indexes, write_indexes, knowledge
@@ -1686,7 +1830,9 @@ class DirectPipeline:
                     "repair_accepted",
                     {"attempt": attempt, "changes": proposal},
                 )
+                save_checkpoint("accepted", attempt, [], changes=changes)
                 return proposed
+            save_checkpoint("retry", attempt + 1, feedback)
         raise RuntimeError(
             f"{stage} failed source-fidelity validation after "
             f"{self.config.pipeline.max_repair_attempts} attempts: {feedback}"
@@ -1722,11 +1868,25 @@ class DirectPipeline:
                 "hard_terminology_findings",
                 {"issues": term_issues},
             )
-            for region in self.repair_planner.plan(term_issues, len(chapter.segments)):
+            term_state = shadow.setdefault("terminology_repair_state", {})
+            for region in self.repair_planner.plan(
+                term_issues, len(chapter.segments)
+            ):
+                region_id = self._repair_checkpoint_id(
+                    "terminology_repair", region
+                )
                 targets = self._repair_and_validate(
-                    store, chapter, targets, region, "terminology_repair"
+                    store,
+                    chapter,
+                    targets,
+                    region,
+                    "terminology_repair",
+                    shadow=shadow,
+                    checkpoint_state=term_state,
+                    checkpoint_id=region_id,
                 )
                 self._save_targets(shadow, targets)
+                term_state.pop("pending_repair", None)
                 self._save_shadow(store, chapter.index, shadow)
             remaining = self._terminology_issues(
                 chapter,
@@ -1738,6 +1898,7 @@ class DirectPipeline:
                     "cannot promote chapter with hard terminology violations after repair: "
                     f"{remaining}"
                 )
+        shadow.pop("terminology_repair_state", None)
         previous = {segment.index: segment.target or "" for segment in chapter.segments}
         for segment in chapter.segments:
             if segment.source.strip():

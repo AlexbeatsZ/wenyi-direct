@@ -14,6 +14,7 @@ from wenyi_direct.assemble.writer import assemble
 from wenyi_direct.cli import app
 from wenyi_direct.config import Config
 from wenyi_direct.ingest.models import Chapter, Segment
+from wenyi_direct.llm.base import TransientProviderError
 from wenyi_direct.llm.providers.fake import FakeClient
 from wenyi_direct.pipeline.direct import (
     AlignmentError,
@@ -371,6 +372,52 @@ def test_failed_repair_never_changes_formal_chapter(tmp_path: Path) -> None:
     assert shadow["targets"]["1"] == "闪光了。"
     usage = json.loads(Path(pipeline.store_for(source).usage_path).read_text(encoding="utf-8"))
     assert usage["providers"]
+
+
+def test_repair_proposal_resumes_at_validation_without_recalling_repair(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    config = _config(tmp_path)
+    fail_validation_once = True
+
+    def unstable(messages, tier, json_mode):
+        nonlocal fail_validation_once
+        if messages[0]["content"] == FIDELITY_SYSTEM:
+            payload = _payload(messages)
+            if fail_validation_once and any(
+                row.get("changed") and row.get("candidate_target") == "亮了。"
+                for row in payload["segments"]
+            ):
+                fail_validation_once = False
+                raise TransientProviderError("temporary validation EOF")
+        return _handler(messages, tier, json_mode)
+
+    fake = FakeClient(unstable)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+
+    with pytest.raises(TransientProviderError, match="temporary validation EOF"):
+        pipeline.run(source, chapters={0})
+    factual_repairs = sum(
+        call["messages"][0]["content"] == REPAIR_SYSTEM
+        and _payload(call["messages"])["issues"][0]["type"] == "mistranslation"
+        for call in fake.calls
+    )
+    shadow = pipeline.store_for(source).load_shadow(0)
+    assert shadow is not None
+    assert shadow["factual_state"]["pending_repair"]["status"] == "proposal"
+
+    pipeline.run(source, chapters={0})
+
+    assert sum(
+        call["messages"][0]["content"] == REPAIR_SYSTEM
+        and _payload(call["messages"])["issues"][0]["type"] == "mistranslation"
+        for call in fake.calls
+    ) == factual_repairs
+    assert pipeline.store_for(source).load_manifest()["chapters"][0]["status"] == "done"
 
 
 def test_chinese_stage_resume_reuses_reader_and_validation_checkpoints(

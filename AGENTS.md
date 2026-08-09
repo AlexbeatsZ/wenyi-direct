@@ -18,6 +18,9 @@ or atomic Formal promotion.
   audit, repair proposal, and validation results as one-line JSON records.
 - Promotion resumes across the final Shadow/manifest commit window by reconciling a
   matching done Shadow with Formal; inconsistent targets remain blocked.
+- Agy/Codex CLI calls retry recognized transient failures and use the configured
+  fallback only after retries are exhausted; repair proposals resume directly at
+  fidelity validation instead of repeating a completed repair call.
 - Detailed scheduling and concurrency rules: `docs/design/stage-execution.md`.
 
 ## Active Work
@@ -90,6 +93,14 @@ promotion to the final text.
 - Agy 1.1 on Windows may briefly retain its per-call cwd after returning success.
   Blank `request.txt` before cleanup and ignore only the residual directory-lock
   error; never convert a valid paid response into a pipeline failure.
+- CLI `max_retries` is ineffective unless each CLI adapter consumes it. Classify
+  only recognizable transient transport/runtime failures for retry/fallback;
+  explicit CLI quota exhaustion and repeated malformed JSON may use the configured
+  fallback, while authentication, configuration, alignment, and quality failures
+  must remain visible.
+- Persist a repair proposal in Shadow before fidelity validation and mark an
+  accepted proposal before returning it to the caller. Otherwise a validator or
+  process interruption repeats an already paid repair call on resume.
 - Formal is saved before the manifest is marked done, so a process exit may leave a
   done Shadow beside a pending manifest. Treat the done Shadow as the commit marker
   only after its complete stable-ID set and every translated target exactly match

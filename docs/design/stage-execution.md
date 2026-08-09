@@ -50,6 +50,12 @@ Audit and repair are separate checkpoints. Re-running an unfinished audit reuses
 completed windows and validations. Repair regions have stable persisted IDs, so a
 crash resumes after accepted regions instead of repeating them.
 
+Each repair proposal is also checkpointed before source-fidelity validation. If the
+validator or process fails after the repair model has returned, resume validates the
+same persisted proposal instead of paying for and potentially changing the repair a
+second time. An accepted proposal is checkpointed before its region is committed, so
+the final small commit window is resumable without another model call as well.
+
 ## Two-lane parallel mode
 
 `translate --parallel` pipelines adjacent chapters with a one-chapter offset:
@@ -93,6 +99,13 @@ owned by one chapter lane at a time.
 A worker failure is propagated at the join. Completed windows, audit results, repair
 regions, and Shadow targets are already persisted, so the next invocation resumes
 through the same stage dispatcher. Formal text changes only in `promote`.
+
+CLI providers retry only recognized transient transport/runtime failures according
+to `max_retries`. If those retries are exhausted and
+`roles.content_policy_fallback` is configured, the same request is sent to that
+fallback. Explicit CLI quota exhaustion and repeated malformed JSON also route to
+the fallback only after primary retries are exhausted. Permanent authentication,
+configuration, alignment, and quality-gate failures remain explicit errors.
 
 Promotion uses the persisted `done` Shadow as its commit marker. If the process exits
 after the Formal chapter and done Shadow are saved but before the manifest status is

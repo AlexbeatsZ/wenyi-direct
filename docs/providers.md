@@ -4,10 +4,13 @@ Logical roles (`translate`, `factual_audit`, `chinese_audit`, `repair`, and
 `validation`) refer to named providers. Multiple roles may share one constructed
 client, or use different transports.
 
-An optional `roles.content_policy_fallback` names one provider used only when the
-selected stage provider raises an explicit content-policy refusal. Quota errors,
-timeouts, malformed JSON, alignment failures, and ordinary runtime errors do not
-switch providers.
+An optional `roles.content_policy_fallback` names one provider used when the
+selected stage provider raises an explicit content-policy refusal, or after a CLI
+provider exhausts `max_retries` for a recognized transient transport/runtime
+failure such as EOF, connection reset, rate limiting, service unavailability, or
+timeout. Repeated invalid JSON also routes to the fallback after the primary's own
+JSON retries are exhausted. Authentication, configuration, alignment, and other
+permanent or quality-gate failures do not switch providers.
 
 ## Codex CLI
 

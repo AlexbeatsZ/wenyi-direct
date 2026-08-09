@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from wenyi_direct.config import Config, LLMConfig, TierConfig
-from wenyi_direct.llm.base import ContentPolicyError, LLMClient
+from wenyi_direct.llm.base import ContentPolicyError, LLMClient, TransientProviderError
 from wenyi_direct.llm.factory import build_clients
 from wenyi_direct.llm.policy_fallback import ContentPolicyFallbackClient
 from wenyi_direct.llm.providers.agy import AgyClient
@@ -46,6 +46,37 @@ def test_codex_cli_is_ephemeral_read_only_and_ignores_rules(tmp_path, monkeypatc
     assert "--ignore-rules" in args
     assert args[args.index("--sandbox") + 1] == "read-only"
     assert captured["input"].endswith("explanatory text.")
+
+
+def test_codex_cli_retries_transient_transport_failure(tmp_path, monkeypatch) -> None:
+    calls = 0
+    delays = []
+
+    def fake_run(args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(
+                args, 1, stdout="", stderr="stream disconnected before completion"
+            )
+        return subprocess.CompletedProcess(args, 0, stdout='{"ok":true}', stderr="")
+
+    monkeypatch.setattr("wenyi_direct.llm.providers.codex_cli.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "wenyi_direct.llm.providers.codex_cli.time.sleep", lambda delay: delays.append(delay)
+    )
+    client = CodexCLIClient(
+        LLMConfig(
+            provider="codex-cli",
+            cwd=str(tmp_path),
+            max_retries=3,
+            tiers={"strong": TierConfig(model="gpt-test")},
+        )
+    )
+
+    assert client.complete([{"role": "user", "content": "hello"}]) == '{"ok":true}'
+    assert calls == 2
+    assert delays == [1]
 
 
 def test_agy_uses_fresh_print_plan_request(tmp_path, monkeypatch) -> None:
@@ -110,6 +141,68 @@ def test_agy_large_prompt_never_enters_windows_argv(tmp_path, monkeypatch) -> No
 
     assert captured["request_length"] > 70_000
     assert max(map(len, captured["args"])) < 1_000
+
+
+def test_agy_retries_transient_eligibility_eof(tmp_path, monkeypatch) -> None:
+    calls = 0
+    delays = []
+
+    def fake_run(args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(
+                args,
+                1,
+                stdout="",
+                stderr=(
+                    "Error: Eligibility check failed: failed to get profile picture: "
+                    'Get "https://lh3.googleusercontent.com/avatar": EOF'
+                ),
+            )
+        return subprocess.CompletedProcess(args, 0, stdout='{"ok":true}', stderr="")
+
+    monkeypatch.setattr("wenyi_direct.llm.providers.agy.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "wenyi_direct.llm.providers.agy.time.sleep", lambda delay: delays.append(delay)
+    )
+    client = AgyClient(
+        LLMConfig(
+            provider="agy",
+            cwd=str(tmp_path),
+            max_retries=3,
+            tiers={"strong": TierConfig(model="gemini-3.6-flash-high")},
+        )
+    )
+
+    assert client.complete([{"role": "user", "content": "hello"}]) == '{"ok":true}'
+    assert calls == 2
+    assert delays == [1]
+
+
+def test_agy_does_not_retry_permanent_cli_failure(tmp_path, monkeypatch) -> None:
+    calls = 0
+
+    def fake_run(args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            args, 1, stdout="", stderr="Error: authentication required"
+        )
+
+    monkeypatch.setattr("wenyi_direct.llm.providers.agy.subprocess.run", fake_run)
+    client = AgyClient(
+        LLMConfig(
+            provider="agy",
+            cwd=str(tmp_path),
+            max_retries=3,
+            tiers={"strong": TierConfig(model="gemini-3.6-flash-high")},
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="authentication required"):
+        client.complete([{"role": "user", "content": "hello"}])
+    assert calls == 1
 
 
 def test_agy_same_provider_allows_two_isolated_calls_to_overlap(
@@ -233,7 +326,7 @@ class _ResultClient(LLMClient):
         return self.result
 
 
-def test_policy_fallback_only_handles_explicit_content_refusal() -> None:
+def test_configured_fallback_handles_policy_transient_and_invalid_json_only() -> None:
     primary = _ResultClient(ContentPolicyError("refused"))
     fallback = _ResultClient('{"ok":true}')
     client = ContentPolicyFallbackClient(primary, fallback)
@@ -251,6 +344,30 @@ def test_policy_fallback_only_handles_explicit_content_refusal() -> None:
     with pytest.raises(RuntimeError, match="quota"):
         runtime_client.complete([])
     assert untouched_fallback.calls == 0
+
+    transient_primary = _ResultClient(TransientProviderError("temporary EOF"))
+    transient_fallback = _ResultClient('{"route":"fallback"}')
+    transient_client = ContentPolicyFallbackClient(
+        transient_primary, transient_fallback
+    )
+    assert json.loads(transient_client.complete([], stage="validation")) == {
+        "route": "fallback"
+    }
+    assert transient_client.usage_summary()["transient_error_fallback_events"] == [
+        {"stage": "validation", "reason": "temporary EOF"}
+    ]
+
+    invalid_primary = _ResultClient("not valid json")
+    invalid_fallback = _ResultClient('{"route":"fallback-json"}')
+    invalid_client = ContentPolicyFallbackClient(invalid_primary, invalid_fallback)
+    assert invalid_client.complete_json([], stage="factual_audit") == {
+        "route": "fallback-json"
+    }
+    assert invalid_primary.calls == 2
+    assert invalid_fallback.calls == 1
+    assert len(
+        invalid_client.usage_summary()["invalid_response_fallback_events"]
+    ) == 1
 
 
 def test_factory_reuses_one_policy_fallback_wrapper(monkeypatch) -> None:
