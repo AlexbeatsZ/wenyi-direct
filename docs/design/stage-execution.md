@@ -94,6 +94,12 @@ A worker failure is propagated at the join. Completed windows, audit results, re
 regions, and Shadow targets are already persisted, so the next invocation resumes
 through the same stage dispatcher. Formal text changes only in `promote`.
 
+Promotion uses the persisted `done` Shadow as its commit marker. If the process exits
+after the Formal chapter and done Shadow are saved but before the manifest status is
+updated, resume compares every translated stable ID and Formal target with that Shadow
+before completing the manifest update without another model call. A mismatch remains
+an explicit state error rather than being silently accepted.
+
 ## CLI progress and live audit records
 
 `DirectPipeline` emits transport-neutral progress events from the shared stage

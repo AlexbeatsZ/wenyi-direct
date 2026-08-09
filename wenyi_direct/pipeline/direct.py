@@ -275,9 +275,7 @@ class DirectPipeline:
     ) -> RunStore:
         store = self.prepare(source_path)
         with store.lock():
-            pending = store.pending_chapters()
-            if chapters is not None:
-                pending = [index for index in pending if index in chapters]
+            pending = self._selected_chapters(store, chapters, pending_only=True)
             self._emit_progress(
                 "operation_started", operation="translate", chapters=tuple(pending)
             )
@@ -513,7 +511,9 @@ class DirectPipeline:
                 result.append(chapter_index)
                 continue
             if marker and phase == "done":
-                store.set_chapter_fields(chapter_index, status=STATUS_DONE, task="", error=None)
+                self._reconcile_completed_promotion(
+                    store, store.load_chapter(chapter_index), shadow
+                )
                 continue
             if marker:
                 if force:
@@ -653,6 +653,9 @@ class DirectPipeline:
             raise RuntimeError(
                 f"chapter {chapter_index} source changed after shadow creation"
             )
+        if shadow and shadow.get("phase") == "done":
+            self._reconcile_completed_promotion(store, chapter, shadow)
+            return chapter, shadow
         current_policy = self._policy_fingerprint()
         if shadow and shadow.get("policy_fingerprint") not in {None, current_policy}:
             expected = {
@@ -700,6 +703,48 @@ class DirectPipeline:
         shadow.setdefault("stage_snapshots", {})
         self._clean_shadow_control_metadata(store, chapter, shadow)
         return chapter, shadow
+
+    def _reconcile_completed_promotion(
+        self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
+    ) -> None:
+        """Finish the manifest commit when Formal and a done Shadow already agree."""
+        manifest = store.load_manifest()
+        item = next(row for row in manifest["chapters"] if row["index"] == chapter.index)
+        if item.get("status") == STATUS_DONE:
+            return
+
+        targets = self._targets(shadow)
+        expected_ids = {
+            segment_id(chapter.index, segment) for segment in chapter.text_segments
+        }
+        translated_ids = set(shadow.get("translated_ids", []))
+        mismatched = [
+            segment.index
+            for segment in chapter.text_segments
+            if not targets.get(segment.index, "").strip()
+            or segment.target != targets.get(segment.index)
+        ]
+        if translated_ids != expected_ids or mismatched:
+            raise StageTaskError(
+                f"chapter {chapter.index} has a done Shadow that does not match Formal: "
+                f"translated_ids_match={translated_ids == expected_ids}, "
+                f"mismatched_targets={mismatched}"
+            )
+
+        store.set_chapter_fields(
+            chapter.index,
+            status=STATUS_DONE,
+            phase="done",
+            task="",
+            error=None,
+            factual_audit=self.config.pipeline.factual_audit,
+            chinese_reader_audit=self.config.pipeline.chinese_reader_audit,
+        )
+        store.log_event(
+            "chapter_promotion_recovered",
+            chapter=chapter.index,
+            formal_review=bool(shadow.get("formal_review")),
+        )
 
     @staticmethod
     def _factual_audit_complete(shadow: dict[str, Any]) -> bool:

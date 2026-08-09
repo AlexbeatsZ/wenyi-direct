@@ -16,6 +16,8 @@ or atomic Formal promotion.
   `review --parallel`; completed review generations require `--force` to reopen.
 - Long-running CLI commands show overall and per-lane progress, and stream parsed
   audit, repair proposal, and validation results as one-line JSON records.
+- Promotion resumes across the final Shadow/manifest commit window by reconciling a
+  matching done Shadow with Formal; inconsistent targets remain blocked.
 - Detailed scheduling and concurrency rules: `docs/design/stage-execution.md`.
 
 ## Active Work
@@ -88,6 +90,10 @@ promotion to the final text.
 - Agy 1.1 on Windows may briefly retain its per-call cwd after returning success.
   Blank `request.txt` before cleanup and ignore only the residual directory-lock
   error; never convert a valid paid response into a pipeline failure.
+- Formal is saved before the manifest is marked done, so a process exit may leave a
+  done Shadow beside a pending manifest. Treat the done Shadow as the commit marker
+  only after its complete stable-ID set and every translated target exactly match
+  Formal; then reconcile the manifest without repeating paid stages.
 - Legacy Formal states may lack `source_sha256`. Backfill it only after reparsing the
   current source and matching every chapter/segment index, source, kind, and anchor;
   never bypass the source-change guard with a blind manifest edit.

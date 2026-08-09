@@ -550,6 +550,106 @@ def test_low_level_exports_reject_incomplete_formal_state(tmp_path: Path) -> Non
         assemble(store, str(source), str(tmp_path / "incomplete.epub"))
 
 
+def test_resume_reconciles_completed_promotion_after_manifest_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "promotion-crash.json"
+    source.write_text(
+        json.dumps(
+            {
+                "title": "test",
+                "chapters": [
+                    {"title": "c0", "segments": [{"source": "光った。"}]}
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    config = _config(tmp_path)
+    config.pipeline.factual_audit = False
+    config.pipeline.chinese_reader_audit = False
+    fake = FakeClient(_handler)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+    store = pipeline.prepare(source)
+    original_set_chapter_fields = store.set_chapter_fields
+    promotion_interrupted = False
+
+    def interrupt_manifest_commit(chapter_index: int, **fields) -> None:
+        nonlocal promotion_interrupted
+        if fields.get("status") == "done" and not promotion_interrupted:
+            promotion_interrupted = True
+            raise KeyboardInterrupt("simulated process exit before manifest commit")
+        original_set_chapter_fields(chapter_index, **fields)
+
+    monkeypatch.setattr(store, "set_chapter_fields", interrupt_manifest_commit)
+    monkeypatch.setattr(pipeline, "store_for", lambda _source: store)
+
+    with pytest.raises(KeyboardInterrupt, match="before manifest commit"):
+        pipeline.run(source)
+
+    assert store.load_chapter(0).segments[0].target == "闪光了。"
+    assert store.load_shadow(0)["phase"] == "done"
+    assert store.load_manifest()["chapters"][0]["status"] == "pending"
+    calls_before_resume = len(fake.calls)
+
+    pipeline.run(source)
+
+    chapter_state = store.load_manifest()["chapters"][0]
+    assert chapter_state["status"] == "done"
+    assert chapter_state["phase"] == "done"
+    assert chapter_state["task"] == ""
+    assert len(fake.calls) == calls_before_resume
+    assert Path(export_json(store, tmp_path / "recovered.json")).exists()
+    assert "chapter_promotion_recovered" in Path(store.event_log_path).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_resume_refuses_done_shadow_when_formal_targets_disagree(tmp_path: Path) -> None:
+    source = tmp_path / "mismatched-promotion.json"
+    source.write_text(
+        json.dumps(
+            {
+                "title": "test",
+                "chapters": [
+                    {"title": "c0", "segments": [{"source": "光った。"}]}
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    config = _config(tmp_path)
+    config.pipeline.factual_audit = False
+    config.pipeline.chinese_reader_audit = False
+    fake = FakeClient(_handler)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+    store = pipeline.run(source)
+    formal = store.load_chapter(0)
+    formal.segments[0].target = "被篡改的 Formal。"
+    store.save_chapter(formal)
+    manifest = store.load_manifest()
+    manifest["chapters"][0]["status"] = "pending"
+    store.save_manifest(manifest)
+
+    with pytest.raises(StageTaskError, match="done Shadow that does not match Formal"):
+        pipeline.run(source)
+
+
+def test_sequential_run_rejects_unknown_chapter_indexes(tmp_path: Path) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    pipeline = DirectPipeline(_config(tmp_path), {}, config_dir=tmp_path)
+
+    with pytest.raises(ValueError, match=r"unknown chapter indexes: \[99\]"):
+        pipeline.run(source, chapters={99})
+
+
 def test_resume_rejects_changed_source_file(tmp_path: Path) -> None:
     source = tmp_path / "book.json"
     _write_book(source)
