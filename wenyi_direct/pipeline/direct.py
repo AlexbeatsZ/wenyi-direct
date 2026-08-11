@@ -22,12 +22,15 @@ from ..prompts import (
     CHINESE_READER_SYSTEM,
     FACTUAL_AUDIT_SYSTEM,
     FIDELITY_SYSTEM,
+    LEGACY_REPAIR_SYSTEM,
+    REPAIR_ARBITRATION_SYSTEM,
     REPAIR_SYSTEM,
     TRANSLATION_SYSTEM,
     chinese_finding_validation_messages,
     chinese_reader_messages,
     factual_audit_messages,
     fidelity_validation_messages,
+    repair_arbitration_messages,
     repair_messages,
     translation_messages,
 )
@@ -57,6 +60,7 @@ STAGE_NAMES = (
 
 
 _SPEAKER_METADATA_PREFIX_RE = re.compile(r"^\s*【話者：[^】]*】\s*")
+_REPAIR_CHECKPOINT_VERSION = 2
 
 
 def _clean_target_control_metadata(target: str) -> str:
@@ -161,23 +165,17 @@ class DirectPipeline:
 
     def prepare(self, source_path: str | Path) -> RunStore:
         source = str(Path(source_path).resolve())
-        self._emit_progress(
-            "prepare_started", detail=Path(source).name
-        )
+        self._emit_progress("prepare_started", detail=Path(source).name)
         source_sha256 = hashlib.sha256(Path(source).read_bytes()).hexdigest()
         store = self.store_for(source)
         if store.exists():
             manifest = store.load_manifest()
             recorded = str(Path(manifest["source_path"]).resolve())
             if recorded != source:
-                raise ValueError(
-                    f"state belongs to another source: {manifest['source_path']}"
-                )
+                raise ValueError(f"state belongs to another source: {manifest['source_path']}")
             recorded_sha256 = manifest.get("source_sha256")
             if not recorded_sha256:
-                self._migrate_legacy_source_sha256(
-                    store, manifest, source, source_sha256
-                )
+                self._migrate_legacy_source_sha256(store, manifest, source, source_sha256)
             elif recorded_sha256 != source_sha256:
                 raise RuntimeError(
                     "source file changed after state creation; create a new state or "
@@ -276,9 +274,7 @@ class DirectPipeline:
         store = self.prepare(source_path)
         with store.lock():
             pending = self._selected_chapters(store, chapters, pending_only=True)
-            self._emit_progress(
-                "operation_started", operation="translate", chapters=tuple(pending)
-            )
+            self._emit_progress("operation_started", operation="translate", chapters=tuple(pending))
             for chapter_index in pending:
                 try:
                     self._run_chapter(store, chapter_index)
@@ -303,9 +299,7 @@ class DirectPipeline:
         with store.lock():
             selected = self._formal_review_chapters(store, chapters, force=force)
             operation = "review-parallel" if parallel else "review"
-            self._emit_progress(
-                "operation_started", operation=operation, chapters=tuple(selected)
-            )
+            self._emit_progress("operation_started", operation=operation, chapters=tuple(selected))
             if not selected:
                 self._emit_progress("operation_completed", operation=operation)
                 return store
@@ -342,13 +336,9 @@ class DirectPipeline:
             selected = self._selected_chapters(store, chapters)
             if chapters is None:
                 selected = [
-                    index
-                    for index in selected
-                    if self._stage_is_ready(store, index, stage)
+                    index for index in selected if self._stage_is_ready(store, index, stage)
                 ]
-            self._emit_progress(
-                "operation_started", operation="stage", chapters=tuple(selected)
-            )
+            self._emit_progress("operation_started", operation="stage", chapters=tuple(selected))
             for chapter_index in selected:
                 try:
                     self._run_stage_for_chapter(store, chapter_index, stage)
@@ -374,9 +364,7 @@ class DirectPipeline:
                 chapters=tuple(selected),
             )
             if not selected:
-                self._emit_progress(
-                    "operation_completed", operation="translate-parallel"
-                )
+                self._emit_progress("operation_completed", operation="translate-parallel")
                 return store
             self._allow_provisional_factual_context = True
             try:
@@ -385,9 +373,7 @@ class DirectPipeline:
             finally:
                 self._allow_provisional_factual_context = False
                 self._save_usage(store)
-            self._emit_progress(
-                "operation_completed", operation="translate-parallel"
-            )
+            self._emit_progress("operation_completed", operation="translate-parallel")
         return store
 
     @staticmethod
@@ -451,9 +437,7 @@ class DirectPipeline:
             previous = current
         self._run_downstream(store, previous)
 
-    def _run_formal_review_parallel_sequence(
-        self, store: RunStore, chapters: list[int]
-    ) -> None:
+    def _run_formal_review_parallel_sequence(self, store: RunStore, chapters: list[int]) -> None:
         self._ensure_formal_review_shadow(store, chapters[0])
         self._run_upstream(store, chapters[0], include_repair=True)
         previous = chapters[0]
@@ -522,9 +506,7 @@ class DirectPipeline:
                     )
                 result.append(chapter_index)
                 continue
-            raise StageTaskError(
-                f"chapter {chapter_index} is not Formal and cannot be re-reviewed"
-            )
+            raise StageTaskError(f"chapter {chapter_index} is not Formal and cannot be re-reviewed")
         return result
 
     def _ensure_formal_review_shadow(self, store: RunStore, chapter_index: int) -> None:
@@ -544,9 +526,7 @@ class DirectPipeline:
             if not targets.get(segment.index, "").strip()
         ]
         if missing:
-            raise AlignmentError(
-                f"cannot review Formal chapter with empty targets: {missing}"
-            )
+            raise AlignmentError(f"cannot review Formal chapter with empty targets: {missing}")
         if existing:
             reason = (
                 "new_forced_formal_review"
@@ -643,24 +623,33 @@ class DirectPipeline:
                 return
             self._run_stage_for_chapter(store, chapter_index, stage)
 
-    def _load_shadow(
-        self, store: RunStore, chapter_index: int
-    ) -> tuple[Chapter, dict[str, Any]]:
+    def _load_shadow(self, store: RunStore, chapter_index: int) -> tuple[Chapter, dict[str, Any]]:
         chapter = store.load_chapter(chapter_index)
         digest = chapter_source_digest(chapter)
         shadow = store.load_shadow(chapter_index)
         if shadow and shadow.get("source_digest") != digest:
-            raise RuntimeError(
-                f"chapter {chapter_index} source changed after shadow creation"
-            )
+            raise RuntimeError(f"chapter {chapter_index} source changed after shadow creation")
         if shadow and shadow.get("phase") == "done":
             self._reconcile_completed_promotion(store, chapter, shadow)
             return chapter, shadow
         current_policy = self._policy_fingerprint()
-        if shadow and shadow.get("policy_fingerprint") not in {None, current_policy}:
-            expected = {
-                segment_id(chapter.index, segment) for segment in chapter.text_segments
-            }
+        legacy_policy = self._policy_fingerprint(include_repair_arbitration=False)
+        if (
+            shadow
+            and legacy_policy != current_policy
+            and shadow.get("policy_fingerprint") == legacy_policy
+        ):
+            previous_policy = shadow.get("policy_fingerprint")
+            self._save_shadow(store, chapter.index, shadow)
+            store.log_event(
+                "shadow_policy_migrated",
+                chapter=chapter.index,
+                previous_policy=previous_policy,
+                current_policy=current_policy,
+                migration="additive_repair_arbitration",
+            )
+        elif shadow and shadow.get("policy_fingerprint") not in {None, current_policy}:
+            expected = {segment_id(chapter.index, segment) for segment in chapter.text_segments}
             completed = set(shadow.get("translated_ids", []))
             if completed != expected:
                 phase = "translate"
@@ -674,6 +663,8 @@ class DirectPipeline:
             shadow["phase"] = phase
             shadow.pop("factual_state", None)
             shadow.pop("chinese_state", None)
+            shadow.pop("promotion_state", None)
+            shadow.pop("terminology_repair_state", None)
             shadow.setdefault("stage_snapshots", {}).pop("factual", None)
             self._save_shadow(store, chapter.index, shadow)
             store.log_event(
@@ -714,9 +705,7 @@ class DirectPipeline:
             return
 
         targets = self._targets(shadow)
-        expected_ids = {
-            segment_id(chapter.index, segment) for segment in chapter.text_segments
-        }
+        expected_ids = {segment_id(chapter.index, segment) for segment in chapter.text_segments}
         translated_ids = set(shadow.get("translated_ids", []))
         mismatched = [
             segment.index
@@ -762,9 +751,7 @@ class DirectPipeline:
             return "factual-repair" if self._factual_audit_complete(shadow) else "factual-audit"
         if phase == "chinese_audit":
             return "chinese-repair" if self._chinese_audit_complete(shadow) else "chinese-audit"
-        return {"translate": "translate", "promote": "promote", "done": "done"}.get(
-            phase, phase
-        )
+        return {"translate": "translate", "promote": "promote", "done": "done"}.get(phase, phase)
 
     def _stage_is_ready(self, store: RunStore, chapter_index: int, stage: str) -> bool:
         manifest = store.load_manifest()
@@ -878,26 +865,27 @@ class DirectPipeline:
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return f"{stage}-{hashlib.sha256(encoded).hexdigest()[:16]}"
 
-    def _policy_fingerprint(self) -> str:
+    def _policy_fingerprint(self, *, include_repair_arbitration: bool = True) -> str:
         with self._terminology_lock:
+            prompts = [
+                TRANSLATION_SYSTEM,
+                FACTUAL_AUDIT_SYSTEM,
+                CHINESE_READER_SYSTEM,
+                CHINESE_FINDING_VALIDATION_SYSTEM,
+                REPAIR_SYSTEM if include_repair_arbitration else LEGACY_REPAIR_SYSTEM,
+                FIDELITY_SYSTEM,
+            ]
+            if include_repair_arbitration:
+                prompts.append(REPAIR_ARBITRATION_SYSTEM)
             payload = {
                 "config": self.config.model_dump(mode="json"),
                 "terminology": self.terminology.document.model_dump(mode="json"),
-                "prompts": [
-                    TRANSLATION_SYSTEM,
-                    FACTUAL_AUDIT_SYSTEM,
-                    CHINESE_READER_SYSTEM,
-                    CHINESE_FINDING_VALIDATION_SYSTEM,
-                    REPAIR_SYSTEM,
-                    FIDELITY_SYSTEM,
-                ],
+                "prompts": prompts,
             }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def _save_shadow(
-        self, store: RunStore, chapter_index: int, shadow: dict[str, Any]
-    ) -> None:
+    def _save_shadow(self, store: RunStore, chapter_index: int, shadow: dict[str, Any]) -> None:
         shadow["policy_fingerprint"] = self._policy_fingerprint()
         store.save_shadow(chapter_index, shadow)
 
@@ -922,13 +910,9 @@ class DirectPipeline:
         targets.update(cleaned)
         self._save_targets(shadow, targets)
         self._save_shadow(store, chapter.index, shadow)
-        store.log_event(
-            "control_metadata_cleanup", chapter=chapter.index, count=len(cleaned)
-        )
+        store.log_event("control_metadata_cleanup", chapter=chapter.index, count=len(cleaned))
 
-    def _translate_chapter(
-        self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
-    ) -> None:
+    def _translate_chapter(self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]) -> None:
         completed = set(shadow.get("translated_ids", []))
         plan = list(self.window_planner.plan(chapter))
         completed_windows = sum(
@@ -977,17 +961,13 @@ class DirectPipeline:
                 len(plan),
                 f"窗口 {window_index}/{len(plan)} 已保存",
             )
-        expected = {
-            segment_id(chapter.index, segment) for segment in chapter.text_segments
-        }
+        expected = {segment_id(chapter.index, segment) for segment in chapter.text_segments}
         if completed != expected:
             raise AlignmentError(
                 f"chapter translation incomplete: missing {sorted(expected - completed)}"
             )
         shadow.setdefault("stage_snapshots", {})["direct"] = dict(shadow["targets"])
-        shadow["phase"] = (
-            "factual_audit" if self.config.pipeline.factual_audit else "chinese_audit"
-        )
+        shadow["phase"] = "factual_audit" if self.config.pipeline.factual_audit else "chinese_audit"
         if not self.config.pipeline.factual_audit:
             shadow["stage_snapshots"]["factual"] = dict(shadow["targets"])
         if not self.config.pipeline.factual_audit and not self.config.pipeline.chinese_reader_audit:
@@ -1079,9 +1059,7 @@ class DirectPipeline:
             key = str(batch_index)
             if key in audit_batches:
                 continue
-            window = TranslationWindow(
-                tuple(item["read_indexes"]), tuple(item["write_indexes"])
-            )
+            window = TranslationWindow(tuple(item["read_indexes"]), tuple(item["write_indexes"]))
             source = "\n".join(chapter.segments[index].source for index in window.read_indexes)
             messages = factual_audit_messages(
                 chapter,
@@ -1189,9 +1167,7 @@ class DirectPipeline:
                     "\n".join(targets[index] for index in read_indexes),
                 )
             batch["discoveries_applied"] = True
-            batch["added_terms"] = [
-                term.model_dump(exclude_none=True) for term in added_terms
-            ]
+            batch["added_terms"] = [term.model_dump(exclude_none=True) for term in added_terms]
             changed = True
         if changed:
             self._save_shadow(store, chapter.index, shadow)
@@ -1268,7 +1244,7 @@ class DirectPipeline:
                 "factual-repair",
                 len(completed),
                 len(repair_regions),
-                f"修复范围 {region_index}/{len(repair_regions)} 已通过验证",
+                f"修复范围 {region_index}/{len(repair_regions)} 已完成裁决",
             )
         shadow.setdefault("stage_snapshots", {})["factual"] = dict(shadow["targets"])
         shadow["phase"] = (
@@ -1369,9 +1345,7 @@ class DirectPipeline:
             f"源文验证 {len(validation_indexes)} 个问题批次",
         )
         for batch_index, item in enumerate(stored_reader):
-            window = TranslationWindow(
-                tuple(item["read_indexes"]), tuple(item["write_indexes"])
-            )
+            window = TranslationWindow(tuple(item["read_indexes"]), tuple(item["write_indexes"]))
             batch = list(item["issues"])
             if not batch:
                 continue
@@ -1441,9 +1415,7 @@ class DirectPipeline:
                 accepted_batches.append((batch_index, batch_accepted))
         if not isinstance(state.get("repair_regions"), list):
             repair_regions: list[dict[str, Any]] = []
-            legacy_completed = {
-                int(index) for index in state.get("completed_repair_batches", [])
-            }
+            legacy_completed = {int(index) for index in state.get("completed_repair_batches", [])}
             completed_region_ids: list[str] = []
             for batch_index, batch in accepted_batches:
                 planned = self.repair_planner.plan(batch, len(chapter.segments))
@@ -1463,9 +1435,7 @@ class DirectPipeline:
                         "start": write_indexes[0],
                         "end": write_indexes[-1],
                         "write_indexes": write_indexes,
-                        "issues": [
-                            issue for region in planned for issue in region.issues
-                        ],
+                        "issues": [issue for region in planned for issue in region.issues],
                     }
                 )
                 if batch_index in legacy_completed:
@@ -1540,7 +1510,7 @@ class DirectPipeline:
                 "chinese-repair",
                 len(completed),
                 len(repair_regions),
-                f"修复范围 {region_index}/{len(repair_regions)} 已通过验证",
+                f"修复范围 {region_index}/{len(repair_regions)} 已完成裁决",
             )
         shadow["phase"] = "promote"
         self._save_shadow(store, chapter.index, shadow)
@@ -1584,8 +1554,10 @@ class DirectPipeline:
             *,
             changes: dict[int, str] | None = None,
             input_ref: dict[str, str] | None = None,
+            metadata: dict[str, Any] | None = None,
         ) -> None:
             checkpoint: dict[str, Any] = {
+                "checkpoint_version": _REPAIR_CHECKPOINT_VERSION,
                 "region_id": checkpoint_id,
                 "stage": stage,
                 "status": status,
@@ -1596,13 +1568,195 @@ class DirectPipeline:
                 "feedback": feedback,
             }
             if changes is not None:
-                checkpoint["changes"] = {
-                    str(index): value for index, value in changes.items()
-                }
+                checkpoint["changes"] = {str(index): value for index, value in changes.items()}
             if input_ref is not None:
                 checkpoint["input_ref"] = input_ref
+            if metadata:
+                checkpoint.update(metadata)
             checkpoint_state["pending_repair"] = checkpoint
             self._save_shadow(store, chapter.index, shadow)
+
+        def load_changes(pending: dict[str, Any]) -> dict[int, str]:
+            raw_changes = pending.get("changes")
+            if not isinstance(raw_changes, dict):
+                raise StageTaskError("persisted repair checkpoint changes are not an object")
+            changes = {int(index): str(value) for index, value in raw_changes.items()}
+            if set(changes) != set(write_indexes):
+                raise StageTaskError(
+                    "persisted repair checkpoint changed IDs do not match write scope"
+                )
+            return changes
+
+        def record_skipped(reason: str, current_feedback: list[dict]) -> None:
+            skipped = checkpoint_state.setdefault("skipped_repair_regions", [])
+            if not isinstance(skipped, list):
+                raise StageTaskError("persisted skipped repair regions are not a list")
+            entry = {
+                "region_id": checkpoint_id,
+                "stage": stage,
+                "reason": reason,
+                "feedback": list(current_feedback),
+            }
+            for index, existing in enumerate(skipped):
+                if isinstance(existing, dict) and existing.get("region_id") == checkpoint_id:
+                    skipped[index] = entry
+                    break
+            else:
+                skipped.append(entry)
+
+        def finish_arbitration(
+            decision: str,
+            reason: str,
+            changes: dict[int, str],
+            current_feedback: list[dict],
+            input_ref: dict[str, str] | None,
+            attempt: int,
+        ) -> dict[int, str]:
+            if decision == "accept":
+                arbitrated = dict(targets)
+                arbitrated.update(changes)
+                term_feedback = self._terminology_issues(chapter, arbitrated, write_indexes)
+                if term_feedback:
+                    decision = "skip"
+                    reason = (
+                        f"{reason}; final arbitration violated active hard terminology: "
+                        f"{term_feedback}"
+                    )
+                    current_feedback = term_feedback
+                    changes = {index: targets[index] for index in write_indexes}
+                else:
+                    self._archive_targets(
+                        store,
+                        chapter,
+                        f"{stage}_arbitrated",
+                        changes,
+                        previous=targets,
+                        input_ref=input_ref,
+                        metadata={"attempt": attempt, "reason": reason},
+                    )
+                    self._audit_log(
+                        chapter.index,
+                        visible_stage,
+                        "repair_arbitrated",
+                        {
+                            "attempt": attempt,
+                            "reason": reason,
+                            "issues": list(region.issues),
+                            "validation_feedback": current_feedback,
+                        },
+                    )
+                    save_checkpoint(
+                        "accepted",
+                        attempt,
+                        [],
+                        changes=changes,
+                        input_ref=input_ref,
+                        metadata={"decision": "accept", "reason": reason},
+                    )
+                    return arbitrated
+
+            record_skipped(reason, current_feedback)
+            self._audit_log(
+                chapter.index,
+                visible_stage,
+                "repair_skipped",
+                {
+                    "attempt": attempt,
+                    "reason": reason,
+                    "issues": list(region.issues),
+                    "validation_feedback": current_feedback,
+                },
+            )
+            save_checkpoint(
+                "accepted",
+                attempt,
+                current_feedback,
+                changes={index: targets[index] for index in write_indexes},
+                input_ref=input_ref,
+                metadata={"decision": "skip", "reason": reason},
+            )
+            return targets
+
+        def run_arbitration(
+            rejected_changes: dict[int, str],
+            current_feedback: list[dict],
+            attempt: int,
+        ) -> dict[int, str]:
+            proposed = dict(targets)
+            proposed.update(rejected_changes)
+            source = "\n".join(chapter.segments[index].source for index in read_indexes)
+            knowledge = self._knowledge_for(store, chapter, source)
+            messages = repair_arbitration_messages(
+                chapter,
+                targets,
+                proposed,
+                read_indexes,
+                write_indexes,
+                region.issues,
+                current_feedback,
+                knowledge,
+            )
+            input_ref = store.save_translation_input(
+                {"stage": f"{stage}_arbitration", "messages": messages}
+            )
+            response = self.clients["repair"].complete_json(
+                messages,
+                tier=self.config.pipeline.repair_tier,
+                stage=f"{stage}_arbitration",
+            )
+            decision = (
+                str(response.get("decision", "")).strip().casefold()
+                if isinstance(response, dict)
+                else ""
+            )
+            reason = str(response.get("reason", "")).strip() if isinstance(response, dict) else ""
+            if decision == "accept" and not reason:
+                decision = "skip"
+                reason = "Sol final arbitration did not provide a source-based reason"
+                changes = {index: targets[index] for index in write_indexes}
+            elif decision == "accept":
+                try:
+                    changes = self._parse_translations(chapter, write_indexes, response)
+                except (AlignmentError, KeyError, TypeError, ValueError) as exc:
+                    decision = "skip"
+                    reason = f"Sol final arbitration response was invalid: {exc}"
+                    changes = {index: targets[index] for index in write_indexes}
+            elif decision == "skip":
+                changes = {index: targets[index] for index in write_indexes}
+                reason = reason or "Sol could not confirm a fidelity-safe repair"
+            else:
+                decision = "skip"
+                reason = "Sol final arbitration did not return accept or skip"
+                changes = {index: targets[index] for index in write_indexes}
+            store.record_audit(
+                chapter.index,
+                f"{stage}_arbitration",
+                {
+                    "input_ref": input_ref,
+                    "attempt": attempt,
+                    "decision": decision,
+                    "reason": reason,
+                    "issues": list(region.issues),
+                    "validation_feedback": current_feedback,
+                    "write_indexes": list(write_indexes),
+                },
+            )
+            save_checkpoint(
+                "arbitration_result",
+                attempt,
+                current_feedback,
+                changes=changes,
+                input_ref=input_ref,
+                metadata={"decision": decision, "reason": reason},
+            )
+            return finish_arbitration(
+                decision,
+                reason,
+                changes,
+                current_feedback,
+                input_ref,
+                attempt,
+            )
 
         feedback: list[dict] = []
         start_attempt = 1
@@ -1618,69 +1772,106 @@ class DirectPipeline:
                 "read_indexes": list(read_indexes),
                 "write_indexes": list(write_indexes),
             }
-            mismatched = [
-                key for key, value in expected.items() if pending.get(key) != value
-            ]
+            mismatched = [key for key, value in expected.items() if pending.get(key) != value]
             if mismatched:
                 raise StageTaskError(
-                    "persisted repair checkpoint does not match the current task: "
-                    f"{mismatched}"
+                    f"persisted repair checkpoint does not match the current task: {mismatched}"
                 )
             resumed_status = str(pending.get("status", ""))
-            if resumed_status not in {"proposal", "retry", "accepted"}:
+            if resumed_status not in {
+                "proposal",
+                "retry",
+                "accepted",
+                "arbitration_required",
+                "arbitration_result",
+                "hard_terminology_failed",
+            }:
                 raise StageTaskError(
                     f"persisted repair checkpoint has invalid status: {resumed_status!r}"
                 )
             try:
                 start_attempt = int(pending["attempt"])
             except (KeyError, TypeError, ValueError) as exc:
-                raise StageTaskError(
-                    "persisted repair checkpoint has an invalid attempt"
-                ) from exc
+                raise StageTaskError("persisted repair checkpoint has an invalid attempt") from exc
             raw_feedback = pending.get("feedback", [])
             if not isinstance(raw_feedback, list):
                 raise StageTaskError("persisted repair checkpoint feedback is not a list")
             feedback = list(raw_feedback)
+            if resumed_status == "hard_terminology_failed":
+                raise RuntimeError(
+                    f"{stage} failed source-fidelity validation after "
+                    f"{self.config.pipeline.max_repair_attempts} attempts: {feedback}"
+                )
             if (
                 resumed_status == "retry"
                 and start_attempt > self.config.pipeline.max_repair_attempts
             ):
-                start_attempt = 1
-            if resumed_status in {"proposal", "accepted"}:
-                raw_changes = pending.get("changes")
-                if not isinstance(raw_changes, dict):
-                    raise StageTaskError(
-                        "persisted repair checkpoint changes are not an object"
+                if any(
+                    isinstance(item, dict) and item.get("terminology_violation")
+                    for item in feedback
+                ):
+                    save_checkpoint(
+                        "hard_terminology_failed",
+                        self.config.pipeline.max_repair_attempts,
+                        feedback,
+                        metadata={"migration": "legacy_hard_terminology_failure"},
                     )
-                resumed_changes = {
-                    int(index): str(value) for index, value in raw_changes.items()
-                }
-                if set(resumed_changes) != set(write_indexes):
-                    raise StageTaskError(
-                        "persisted repair checkpoint changed IDs do not match write scope"
+                    raise RuntimeError(
+                        f"{stage} failed source-fidelity validation after "
+                        f"{self.config.pipeline.max_repair_attempts} attempts: "
+                        f"{feedback}"
                     )
+                resumed_status = "arbitration_required"
+                resumed_changes = {index: targets[index] for index in write_indexes}
+                save_checkpoint(
+                    "arbitration_required",
+                    self.config.pipeline.max_repair_attempts,
+                    feedback,
+                    changes=resumed_changes,
+                    metadata={"migration": "legacy_exhausted_retry"},
+                )
+            if resumed_status in {
+                "proposal",
+                "accepted",
+                "arbitration_required",
+                "arbitration_result",
+            }:
+                resumed_changes = (
+                    load_changes(pending) if resumed_changes is None else resumed_changes
+                )
                 raw_input_ref = pending.get("input_ref")
                 if isinstance(raw_input_ref, dict):
                     resumed_input_ref = {
                         str(key): str(value) for key, value in raw_input_ref.items()
                     }
                 if resumed_status == "accepted":
+                    decision = str(pending.get("decision", "accept"))
+                    if decision in {"skip", "reject_finding"}:
+                        record_skipped(str(pending.get("reason", "")), feedback)
+                        self._save_shadow(store, chapter.index, shadow)
                     accepted = dict(targets)
                     accepted.update(resumed_changes)
                     return accepted
+                if resumed_status == "arbitration_result":
+                    return finish_arbitration(
+                        str(pending.get("decision", "skip")),
+                        str(pending.get("reason", "")),
+                        resumed_changes,
+                        feedback,
+                        resumed_input_ref,
+                        start_attempt,
+                    )
+                if resumed_status == "arbitration_required":
+                    return run_arbitration(resumed_changes, feedback, start_attempt)
 
         for attempt in range(start_attempt, self.config.pipeline.max_repair_attempts + 1):
             self._emit_progress(
                 "stage_activity",
                 chapter=chapter.index,
                 stage=visible_stage,
-                detail=(
-                    f"AI 修复第 {attempt} 次，段落 {write_indexes[0]}–{write_indexes[-1]}"
-                ),
+                detail=(f"AI 修复第 {attempt} 次，段落 {write_indexes[0]}–{write_indexes[-1]}"),
             )
-            source = "\n".join(
-                chapter.segments[index].source for index in read_indexes
-            )
+            source = "\n".join(chapter.segments[index].source for index in read_indexes)
             knowledge = self._knowledge_for(store, chapter, source)
             input_ref: dict[str, str] | None
             reused_proposal = False
@@ -1709,6 +1900,42 @@ class DirectPipeline:
                     tier=self.config.pipeline.repair_tier,
                     stage=stage,
                 )
+                repair_decision = (
+                    str(response.get("decision", "repair")).strip().casefold()
+                    if isinstance(response, dict)
+                    else "repair"
+                )
+                if repair_decision == "reject_finding":
+                    reason = str(response.get("reason", "")).strip()
+                    if not reason:
+                        raise AlignmentError(
+                            "repair decision reject_finding requires a source-based reason"
+                        )
+                    record_skipped(reason, feedback)
+                    self._audit_log(
+                        chapter.index,
+                        visible_stage,
+                        "repair_finding_rejected",
+                        {
+                            "attempt": attempt,
+                            "reason": reason,
+                            "issues": list(region.issues),
+                        },
+                    )
+                    save_checkpoint(
+                        "accepted",
+                        attempt,
+                        feedback,
+                        changes={index: targets[index] for index in write_indexes},
+                        input_ref=input_ref,
+                        metadata={
+                            "decision": "reject_finding",
+                            "reason": reason,
+                        },
+                    )
+                    return targets
+                if repair_decision != "repair":
+                    raise AlignmentError("repair decision must be repair or reject_finding")
                 changes = self._parse_translations(chapter, write_indexes, response)
             proposed = dict(targets)
             proposed.update(changes)
@@ -1748,9 +1975,7 @@ class DirectPipeline:
                     changes=changes,
                     input_ref=input_ref,
                 )
-            term_feedback = self._terminology_issues(
-                chapter, proposed, write_indexes
-            )
+            term_feedback = self._terminology_issues(chapter, proposed, write_indexes)
             if term_feedback:
                 feedback = term_feedback
                 store.record_audit(
@@ -1777,6 +2002,19 @@ class DirectPipeline:
                         "write_indexes": list(write_indexes),
                     },
                 )
+                if attempt >= self.config.pipeline.max_repair_attempts:
+                    save_checkpoint(
+                        "hard_terminology_failed",
+                        attempt,
+                        feedback,
+                        changes=changes,
+                        input_ref=input_ref,
+                    )
+                    raise RuntimeError(
+                        f"{stage} failed source-fidelity validation after "
+                        f"{self.config.pipeline.max_repair_attempts} attempts: "
+                        f"{feedback}"
+                    )
                 save_checkpoint("retry", attempt + 1, feedback)
                 continue
             validation_messages = fidelity_validation_messages(
@@ -1832,15 +2070,22 @@ class DirectPipeline:
                 )
                 save_checkpoint("accepted", attempt, [], changes=changes)
                 return proposed
+            if attempt >= self.config.pipeline.max_repair_attempts:
+                save_checkpoint(
+                    "arbitration_required",
+                    attempt,
+                    feedback,
+                    changes=changes,
+                    input_ref=input_ref,
+                )
+                return run_arbitration(changes, feedback, attempt)
             save_checkpoint("retry", attempt + 1, feedback)
         raise RuntimeError(
             f"{stage} failed source-fidelity validation after "
             f"{self.config.pipeline.max_repair_attempts} attempts: {feedback}"
         )
 
-    def _promote(
-        self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]
-    ) -> None:
+    def _promote(self, store: RunStore, chapter: Chapter, shadow: dict[str, Any]) -> None:
         self._stage_progress(
             chapter.index,
             "promote",
@@ -1869,12 +2114,8 @@ class DirectPipeline:
                 {"issues": term_issues},
             )
             term_state = shadow.setdefault("terminology_repair_state", {})
-            for region in self.repair_planner.plan(
-                term_issues, len(chapter.segments)
-            ):
-                region_id = self._repair_checkpoint_id(
-                    "terminology_repair", region
-                )
+            for region in self.repair_planner.plan(term_issues, len(chapter.segments)):
+                region_id = self._repair_checkpoint_id("terminology_repair", region)
                 targets = self._repair_and_validate(
                     store,
                     chapter,
@@ -1935,9 +2176,7 @@ class DirectPipeline:
     ) -> dict[int, str]:
         if not isinstance(response, dict) or not isinstance(response.get("translations"), list):
             raise AlignmentError("response must be an object with a translations array")
-        expected = {
-            segment_id(chapter.index, chapter.segments[index]): index for index in indexes
-        }
+        expected = {segment_id(chapter.index, chapter.segments[index]): index for index in indexes}
         result: dict[int, str] = {}
         seen: set[str] = set()
         for item in response["translations"]:
@@ -1950,7 +2189,9 @@ class DirectPipeline:
             seen.add(stable_id)
             result[expected[stable_id]] = target
         if seen != set(expected):
-            raise AlignmentError(f"translation IDs mismatch: expected {sorted(expected)}, got {sorted(seen)}")
+            raise AlignmentError(
+                f"translation IDs mismatch: expected {sorted(expected)}, got {sorted(seen)}"
+            )
         return result
 
     def _parse_issues(
@@ -1971,9 +2212,7 @@ class DirectPipeline:
                 continue
             try:
                 start = self._resolve_audit_id(chapter, id_map, raw["start_id"])
-                end = self._resolve_audit_id(
-                    chapter, id_map, raw.get("end_id", raw["start_id"])
-                )
+                end = self._resolve_audit_id(chapter, id_map, raw.get("end_id", raw["start_id"]))
                 cause_start = self._resolve_audit_id(
                     chapter, id_map, raw.get("cause_start_id", raw["start_id"])
                 )
@@ -2010,16 +2249,12 @@ class DirectPipeline:
         return parsed
 
     @staticmethod
-    def _resolve_audit_id(
-        chapter: Chapter, id_map: dict[str, int], value: Any
-    ) -> int:
+    def _resolve_audit_id(chapter: Chapter, id_map: dict[str, int], value: Any) -> int:
         """Recover an audit location when only the copied digest suffix is wrong."""
         stable_id = str(value)
         if stable_id in id_map:
             return id_map[stable_id]
-        match = re.fullmatch(
-            r"ch(\d+):s(\d+)(?::[0-9A-Za-z_-]+)?", stable_id
-        )
+        match = re.fullmatch(r"ch(\d+):s(\d+)(?::[0-9A-Za-z_-]+)?", stable_id)
         if match and int(match.group(1)) == chapter.index:
             index = int(match.group(2))
             if any(segment.index == index for segment in chapter.text_segments):
@@ -2068,9 +2303,7 @@ class DirectPipeline:
             segment_id(chapter.index, segment): segment.index for segment in chapter.text_segments
         }
         try:
-            start = self._resolve_audit_id(
-                chapter, id_map, response["repair_start_id"]
-            )
+            start = self._resolve_audit_id(chapter, id_map, response["repair_start_id"])
             end = self._resolve_audit_id(chapter, id_map, response["repair_end_id"])
         except (KeyError, TypeError):
             raise AlignmentError("reader validation returned an unknown repair range")
@@ -2100,8 +2333,7 @@ class DirectPipeline:
     ) -> tuple[int, ...]:
         indexes = [segment.index for segment in chapter.text_segments]
         lengths = {
-            index: len(chapter.segments[index].source)
-            + len((targets or {}).get(index, ""))
+            index: len(chapter.segments[index].source) + len((targets or {}).get(index, ""))
             for index in indexes
         }
         total = sum(lengths.values())
@@ -2116,14 +2348,20 @@ class DirectPipeline:
             changed = False
             if left > 0:
                 length = lengths[indexes[left - 1]]
-                if before + length <= self.config.window.source_halo_chars and chars + length <= self.config.window.max_read_chars:
+                if (
+                    before + length <= self.config.window.source_halo_chars
+                    and chars + length <= self.config.window.max_read_chars
+                ):
                     left -= 1
                     before += length
                     chars += length
                     changed = True
             if right + 1 < len(indexes):
                 length = lengths[indexes[right + 1]]
-                if after + length <= self.config.window.source_halo_chars and chars + length <= self.config.window.max_read_chars:
+                if (
+                    after + length <= self.config.window.source_halo_chars
+                    and chars + length <= self.config.window.max_read_chars
+                ):
                     right += 1
                     after += length
                     chars += length
@@ -2166,9 +2404,7 @@ class DirectPipeline:
             }
         )
 
-    def _knowledge_for(
-        self, store: RunStore, chapter: Chapter, read_source: str
-    ) -> dict[str, Any]:
+    def _knowledge_for(self, store: RunStore, chapter: Chapter, read_source: str) -> dict[str, Any]:
         """Combine confirmed knowledge with a bounded, past-only raw chapter tail."""
         with self._terminology_lock:
             visible = self.terminology.visible(chapter.index, read_source)
@@ -2220,8 +2456,7 @@ class DirectPipeline:
             else "past formal target"
         )
         visible["evidence_priority"] = (
-            "current_and_nearby_source > active hard terms > active preferred terms > "
-            f"{past_label}"
+            f"current_and_nearby_source > active hard terms > active preferred terms > {past_label}"
         )
         return visible
 

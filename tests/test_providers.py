@@ -88,6 +88,43 @@ def test_codex_cli_retries_transient_transport_failure(
     assert delays == [1]
 
 
+def test_codex_usage_limit_interrupts_without_retry_or_fallback(tmp_path, monkeypatch) -> None:
+    calls = 0
+    delays = []
+
+    def fake_run(args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            args,
+            1,
+            stdout="",
+            stderr="You've hit your usage limit",
+        )
+
+    monkeypatch.setattr("wenyi_direct.llm.providers.codex_cli.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "wenyi_direct.llm.providers.codex_cli.time.sleep", lambda delay: delays.append(delay)
+    )
+    primary = CodexCLIClient(
+        LLMConfig(
+            provider="codex-cli",
+            cwd=str(tmp_path),
+            max_retries=3,
+            tiers={"strong": TierConfig(model="gpt-test")},
+        )
+    )
+    fallback = _ResultClient('{"route":"fallback"}')
+    client = ContentPolicyFallbackClient(primary, fallback)
+
+    with pytest.raises(RuntimeError, match="usage limit"):
+        client.complete([{"role": "user", "content": "hello"}])
+
+    assert calls == 1
+    assert delays == []
+    assert fallback.calls == 0
+
+
 def test_agy_uses_fresh_print_plan_request(tmp_path, monkeypatch) -> None:
     captured = {}
 
@@ -198,9 +235,7 @@ def test_agy_retries_transient_eligibility_eof(tmp_path, monkeypatch) -> None:
         "Error: 认证超时",
     ),
 )
-def test_agy_retries_any_reported_timeout(
-    tmp_path, monkeypatch, failure_detail
-) -> None:
+def test_agy_retries_any_reported_timeout(tmp_path, monkeypatch, failure_detail) -> None:
     calls = 0
     delays = []
 
@@ -287,9 +322,7 @@ def test_agy_does_not_retry_permanent_cli_failure(tmp_path, monkeypatch) -> None
     assert calls == 1
 
 
-def test_agy_same_provider_allows_two_isolated_calls_to_overlap(
-    tmp_path, monkeypatch
-) -> None:
+def test_agy_same_provider_allows_two_isolated_calls_to_overlap(tmp_path, monkeypatch) -> None:
     both_running = Barrier(2)
 
     def fake_run(args, **kwargs):
@@ -385,9 +418,7 @@ def test_openai_compatible_chat_completions_request() -> None:
     client._client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     )
-    result = client.complete(
-        [{"role": "user", "content": "task"}], json_mode=True, max_tokens=500
-    )
+    result = client.complete([{"role": "user", "content": "task"}], json_mode=True, max_tokens=500)
     assert json.loads(result) == {"ok": True}
     assert captured["model"] == "model-test"
     assert captured["response_format"] == {"type": "json_object"}
@@ -429,12 +460,8 @@ def test_configured_fallback_handles_policy_transient_and_invalid_json_only() ->
 
     transient_primary = _ResultClient(TransientProviderError("temporary EOF"))
     transient_fallback = _ResultClient('{"route":"fallback"}')
-    transient_client = ContentPolicyFallbackClient(
-        transient_primary, transient_fallback
-    )
-    assert json.loads(transient_client.complete([], stage="validation")) == {
-        "route": "fallback"
-    }
+    transient_client = ContentPolicyFallbackClient(transient_primary, transient_fallback)
+    assert json.loads(transient_client.complete([], stage="validation")) == {"route": "fallback"}
     assert transient_client.usage_summary()["transient_error_fallback_events"] == [
         {"stage": "validation", "reason": "temporary EOF"}
     ]
@@ -442,14 +469,10 @@ def test_configured_fallback_handles_policy_transient_and_invalid_json_only() ->
     invalid_primary = _ResultClient("not valid json")
     invalid_fallback = _ResultClient('{"route":"fallback-json"}')
     invalid_client = ContentPolicyFallbackClient(invalid_primary, invalid_fallback)
-    assert invalid_client.complete_json([], stage="factual_audit") == {
-        "route": "fallback-json"
-    }
+    assert invalid_client.complete_json([], stage="factual_audit") == {"route": "fallback-json"}
     assert invalid_primary.calls == 2
     assert invalid_fallback.calls == 1
-    assert len(
-        invalid_client.usage_summary()["invalid_response_fallback_events"]
-    ) == 1
+    assert len(invalid_client.usage_summary()["invalid_response_fallback_events"]) == 1
 
 
 def test_factory_reuses_one_policy_fallback_wrapper(monkeypatch) -> None:

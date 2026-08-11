@@ -21,6 +21,9 @@ or atomic Formal promotion.
 - Agy/Codex CLI calls retry recognized transient failures and use the configured
   fallback only after retries are exhausted; repair proposals resume directly at
   fidelity validation instead of repeating a completed repair call.
+- Sol may veto a Gemini finding on the first repair call. After bounded validation
+  disagreement, one persisted Sol final arbitration accepts a fidelity-safe result
+  or skips the region while retaining the pre-repair target.
 - Detailed scheduling and concurrency rules: `docs/design/stage-execution.md`.
 
 ## Active Work
@@ -28,16 +31,12 @@ or atomic Formal promotion.
 - Granular stages and true two-thread chapter staggering are implemented.
 - Shared progress events and live audit JSON are implemented for sequential,
   two-lane, Formal-review, and independent-stage execution.
-- The live Satisfaction review is currently blocked in chapter 9 factual repair,
-  region `factual-r11` (`ch9:s107`): the factual audit requires `初老` to become
-  `中年`, while fidelity validation repeatedly rejects `中年` and asks for
-  `上了年纪`. Because an exhausted `retry` checkpoint restarts attempts at one on
-  the next invocation, this disagreement repeats four paid repair/validation pairs
-  per run instead of reaching an explicit adjudication state. Formal chapter 9 has
-  not been replaced.
-- Codex CLI quota fallback misses the real `You've hit your usage limit` wording.
-  The classifier recognizes `quota exceeded` but treats this current CLI message as
-  a permanent `RuntimeError`, so the configured DeepSeek fallback is bypassed.
+- The live Satisfaction review remains pending in chapter 9 factual repair, region
+  `factual-r11` (`ch9:s107`). Its persisted proposal is intentionally untouched;
+  after deployment it resumes at validation and then enters one Sol arbitration if
+  Gemini still rejects it. Formal chapter 9 has not been replaced.
+- Codex's exact `You've hit your usage limit` response intentionally interrupts
+  immediately without retry or fallback.
 - The abandoned `agent/stage-commands-and-staggered-pipeline` branch is not the
   canonical implementation and must not be merged wholesale.
 
@@ -62,9 +61,11 @@ promotion to the final text.
 - A Chinese-reader finding is only repairable after a separate source-aware
   validation call. Repairs may span neighboring segments; never assume the symptom
   segment is the complete causal scope.
-- The formal chapter is replaced atomically only after structural checks and
-  source-fidelity validation of every changed repair region. Keep proposals in
-  shadow state and append every stage to `artifacts/`.
+- The formal chapter is replaced atomically only after structural checks and a
+  source-aware semantic gate for every changed repair region: ordinary Gemini
+  fidelity validation or a bounded Sol final arbitration. Sol may instead skip a
+  disputed region, which retains its pre-repair target. Keep proposals and rulings
+  in Shadow state and append every stage to `artifacts/`.
 - Only `active` hard terminology is mandatory; `active` preferred rules are advisory,
   while candidate/rejected rules never enter model prompts. Translation groups mean
   shared target fragments, never entity identity. Hard rules must pass deterministic
@@ -105,10 +106,11 @@ promotion to the final text.
   error; never convert a valid paid response into a pipeline failure.
 - CLI `max_retries` is ineffective unless each CLI adapter consumes it. Classify
   only recognizable transient transport/runtime failures for retry/fallback;
-  explicit CLI quota exhaustion and repeated malformed JSON may use the configured
-  fallback. Every explicit timeout, including a headless authentication timeout,
-  must receive bounded retries; authentication failures without a timeout plus
-  configuration, alignment, and quality failures must remain visible.
+  repeated malformed JSON may use the configured fallback. Codex's explicit current
+  usage-limit response must interrupt immediately. Every explicit timeout, including
+  a headless authentication timeout, must receive bounded retries; authentication
+  failures without a timeout plus configuration, alignment, and quality failures
+  must remain visible.
 - Persist a repair proposal in Shadow before fidelity validation and mark an
   accepted proposal before returning it to the caller. Otherwise a validator or
   process interruption repeats an already paid repair call on resume.
@@ -119,11 +121,13 @@ promotion to the final text.
 - Legacy Formal states may lack `source_sha256`. Backfill it only after reparsing the
   current source and matching every chapter/segment index, source, kind, and anchor;
   never bypass the source-change guard with a blind manifest edit.
-- A repair audit and its fidelity validator can disagree about the source meaning.
-  Passing both assertions to the repair model is not enough: if the validator keeps
-  rejecting the audit-required wording, per-run attempt reset creates an unbounded
-  cross-invocation loop. Persist an exhausted/conflict state or otherwise require
-  explicit adjudication before issuing more paid calls.
+- A repair audit and its fidelity validator can disagree about source meaning. Sol
+  therefore needs two explicit powers: veto an unfounded finding before validation,
+  and make one final source-aware accept/skip ruling after bounded disagreement.
+  Persist both the arbitration boundary and result so resume never restarts the
+  paid conflict loop; the latest validator feedback supersedes contradictory old
+  audit requirements in any intermediate repair prompt.
 - Provider failure tests must use exact current CLI wording captured from live runs.
   Generic markers such as `quota exceeded` do not cover Codex's current
-  `You've hit your usage limit` response and therefore do not prove fallback works.
+  `You've hit your usage limit` response; this exact response is deliberately tested
+  as an immediate interruption without retry or fallback.

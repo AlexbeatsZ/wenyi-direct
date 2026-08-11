@@ -29,9 +29,11 @@ from wenyi_direct.prompts import (
     CHINESE_READER_SYSTEM,
     FACTUAL_AUDIT_SYSTEM,
     FIDELITY_SYSTEM,
+    REPAIR_ARBITRATION_SYSTEM,
     REPAIR_SYSTEM,
     TRANSLATION_SYSTEM,
     chinese_reader_messages,
+    repair_messages,
     translation_messages,
 )
 from wenyi_direct.validate import validate_epub
@@ -141,6 +143,7 @@ def test_model_prompt_projection_excludes_renderer_metadata() -> None:
     messages = translation_messages(chapter, (0,), (0,), {})
     payload = _payload(messages)
     assert payload["segments"][0]["continuation"] is True
+    assert "decision" not in payload["required_output"]
     assert "renderer-only-secret" not in json.dumps(messages, ensure_ascii=False)
 
 
@@ -185,11 +188,7 @@ def _handler(messages, _tier, _json_mode):
     if system == CHINESE_READER_SYSTEM:
         row = next((row for row in payload["text"] if row["text"] == "他到来了。"), None)
         noel = next(
-            (
-                row
-                for row in payload["text"]
-                if row["text"] == "诺艾尔的低语消失在轰鸣中。"
-            ),
+            (row for row in payload["text"] if row["text"] == "诺艾尔的低语消失在轰鸣中。"),
             None,
         )
         issues = []
@@ -243,9 +242,7 @@ def _handler(messages, _tier, _json_mode):
                 target = "亮了。"
             elif issue_type == "unnatural":
                 target = (
-                    "他来了。"
-                    if row["source"] == "彼が来た。"
-                    else "诺艾尔的低语被轰鸣声淹没了。"
+                    "他来了。" if row["source"] == "彼が来た。" else "诺艾尔的低语被轰鸣声淹没了。"
                 )
             translations.append({"id": item["id"], "target": target})
         return json.dumps({"translations": translations}, ensure_ascii=False)
@@ -301,14 +298,14 @@ def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) ->
         "repair_validation",
         "repair_accepted",
     }
-    factual_log = next(
-        event for event in audit_events if event.detail == "factual_audit_result"
-    )
+    factual_log = next(event for event in audit_events if event.detail == "factual_audit_result")
     assert factual_log.payload is not None
     assert factual_log.payload["issues"][0]["start_id"].startswith("ch0:s1:")
     proposal_log = next(event for event in audit_events if event.detail == "repair_proposal")
     assert proposal_log.payload is not None
-    assert proposal_log.payload["changes"][0]["before"] != proposal_log.payload["changes"][0]["after"]
+    assert (
+        proposal_log.payload["changes"][0]["before"] != proposal_log.payload["changes"][0]["after"]
+    )
 
     chinese_calls = [
         call for call in fake.calls if call["messages"][0]["content"] == CHINESE_READER_SYSTEM
@@ -348,30 +345,88 @@ def test_full_pipeline_and_chinese_audit_information_boundary(tmp_path: Path) ->
     assert validate_epub(epub_path)["ok"] is True
 
 
-def test_failed_repair_never_changes_formal_chapter(tmp_path: Path) -> None:
+def test_rejected_repair_is_arbitrated_to_skip_without_repeating(tmp_path: Path) -> None:
     source = tmp_path / "book.json"
     _write_book(source)
     config = _config(tmp_path)
     config.pipeline.max_repair_attempts = 1
+    config.pipeline.chinese_reader_audit = False
 
     def rejecting(messages, tier, json_mode):
         if messages[0]["content"] == FIDELITY_SYSTEM:
             return json.dumps({"valid": False, "issues": [{"detail": "still wrong"}]})
+        if messages[0]["content"] == REPAIR_ARBITRATION_SYSTEM:
+            return json.dumps(
+                {
+                    "decision": "skip",
+                    "reason": "审校与验证结论冲突，保留本轮修复前文本",
+                    "translations": [],
+                },
+                ensure_ascii=False,
+            )
         return _handler(messages, tier, json_mode)
 
     fake = FakeClient(rejecting)
     pipeline = DirectPipeline(
         config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
     )
-    with pytest.raises(RuntimeError, match="failed source-fidelity validation"):
-        pipeline.run(source, chapters={0})
+    pipeline.run(source, chapters={0})
     formal = pipeline.store_for(source).load_chapter(0)
-    assert all(segment.target is None for segment in formal.text_segments)
+    assert formal.segments[1].target == "闪光了。"
     shadow = pipeline.store_for(source).load_shadow(0)
     assert shadow is not None
-    assert shadow["targets"]["1"] == "闪光了。"
+    skipped = shadow["factual_state"]["skipped_repair_regions"]
+    assert skipped == [
+        {
+            "region_id": "factual-r0",
+            "stage": "factual_repair",
+            "reason": "审校与验证结论冲突，保留本轮修复前文本",
+            "feedback": [{"detail": "still wrong"}],
+        }
+    ]
+    calls_after_skip = len(fake.calls)
+    pipeline.run(source, chapters={0})
+    assert len(fake.calls) == calls_after_skip
     usage = json.loads(Path(pipeline.store_for(source).usage_path).read_text(encoding="utf-8"))
     assert usage["providers"]
+
+
+def test_sol_can_veto_gemini_finding_before_validation(tmp_path: Path) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    config = _config(tmp_path)
+    config.pipeline.chinese_reader_audit = False
+    validation_calls = 0
+
+    def vetoing(messages, tier, json_mode):
+        nonlocal validation_calls
+        system = messages[0]["content"]
+        if system == REPAIR_SYSTEM:
+            return json.dumps(
+                {
+                    "decision": "reject_finding",
+                    "reason": "源文只表示发光，原译没有审校声称的事实错误",
+                    "translations": [],
+                },
+                ensure_ascii=False,
+            )
+        if system == FIDELITY_SYSTEM:
+            validation_calls += 1
+        return _handler(messages, tier, json_mode)
+
+    fake = FakeClient(vetoing)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+
+    store = pipeline.run(source, chapters={0})
+
+    assert validation_calls == 0
+    assert store.load_chapter(0).segments[1].target == "闪光了。"
+    shadow = store.load_shadow(0)
+    assert shadow["factual_state"]["skipped_repair_regions"][0]["reason"] == (
+        "源文只表示发光，原译没有审校声称的事实错误"
+    )
 
 
 def test_repair_proposal_resumes_at_validation_without_recalling_repair(
@@ -412,12 +467,172 @@ def test_repair_proposal_resumes_at_validation_without_recalling_repair(
 
     pipeline.run(source, chapters={0})
 
-    assert sum(
-        call["messages"][0]["content"] == REPAIR_SYSTEM
-        and _payload(call["messages"])["issues"][0]["type"] == "mistranslation"
-        for call in fake.calls
-    ) == factual_repairs
+    assert (
+        sum(
+            call["messages"][0]["content"] == REPAIR_SYSTEM
+            and _payload(call["messages"])["issues"][0]["type"] == "mistranslation"
+            for call in fake.calls
+        )
+        == factual_repairs
+    )
     assert pipeline.store_for(source).load_manifest()["chapters"][0]["status"] == "done"
+
+
+def test_latest_validation_feedback_supersedes_conflicting_audit_requirement() -> None:
+    chapter = Chapter(
+        index=9,
+        title="章",
+        segments=[Segment(index=0, source="初老の男性", target="老年男子")],
+    )
+    stable_id = segment_id(9, chapter.segments[0])
+    messages = repair_messages(
+        chapter,
+        {0: "老年男子"},
+        (0,),
+        (0,),
+        (
+            {
+                "type": "mistranslation",
+                "detail": "应译为中年男子",
+                "required_meaning": "中年男子",
+                "start_id": stable_id,
+                "end_id": stable_id,
+            },
+        ),
+        {},
+        [
+            {
+                "id": stable_id,
+                "detail": "中年过轻，应表达初入老年",
+                "required_meaning": "上了年纪的男子",
+            }
+        ],
+    )
+
+    payload = _payload(messages)
+    assert payload["required_output"]["decision"] == "repair 或 reject_finding"
+    assert payload["required_output"]["reject_rule"]
+    assert payload["issues"][0]["detail"] == "中年过轻，应表达初入老年"
+    assert payload["issues"][0]["required_meaning"] == "上了年纪的男子"
+    assert "中年男子" not in json.dumps(payload["issues"], ensure_ascii=False)
+
+
+def test_legacy_final_proposal_gets_one_bounded_feedback_first_migration_cycle(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    config = _config(tmp_path)
+    config.pipeline.max_repair_attempts = 1
+    config.pipeline.chinese_reader_audit = False
+    validation_calls = 0
+    repair_calls = 0
+    arbitration_calls = 0
+
+    def migrating(messages, tier, json_mode):
+        nonlocal validation_calls, repair_calls, arbitration_calls
+        system = messages[0]["content"]
+        payload = _payload(messages)
+        if system == REPAIR_SYSTEM:
+            repair_calls += 1
+            return _handler(messages, tier, json_mode)
+        if system == REPAIR_ARBITRATION_SYSTEM:
+            arbitration_calls += 1
+            assert payload["validation_feedback"][0]["required_meaning"] == ("必须明确写出发出了光")
+            return json.dumps(
+                {
+                    "decision": "accept",
+                    "reason": "源文明确描述发光，采用不与验证反馈冲突的表达",
+                    "translations": [
+                        {"id": row["id"], "target": "发出了光。"}
+                        for row in payload["required_output"]["translations"]
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        if system == FIDELITY_SYSTEM:
+            validation_calls += 1
+            changed = next(row for row in payload["segments"] if row["changed"])
+            if validation_calls == 1:
+                raise TransientProviderError("interrupted before validation result")
+            if changed["candidate_target"] != "发出了光。":
+                return json.dumps(
+                    {
+                        "valid": False,
+                        "issues": [
+                            {
+                                "id": changed["id"],
+                                "detail": "旧审校要求与源文验证结论冲突",
+                                "required_meaning": "必须明确写出发出了光",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps({"valid": True, "issues": []}, ensure_ascii=False)
+        return _handler(messages, tier, json_mode)
+
+    fake = FakeClient(migrating)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+
+    with pytest.raises(TransientProviderError, match="interrupted before validation"):
+        pipeline.run(source, chapters={0})
+    store = pipeline.store_for(source)
+    shadow = store.load_shadow(0)
+    pending = shadow["factual_state"]["pending_repair"]
+    assert pending["status"] == "proposal"
+    pending.pop("checkpoint_version", None)
+    pending["feedback"] = [
+        {
+            "id": segment_id(0, store.load_chapter(0).segments[1]),
+            "detail": "旧审校要求与源文验证结论冲突",
+            "required_meaning": "必须明确写出发出了光",
+        }
+    ]
+    store.save_shadow(0, shadow)
+
+    pipeline.run(source, chapters={0})
+
+    assert repair_calls == 1
+    assert arbitration_calls == 1
+    assert validation_calls == 2
+    assert store.load_manifest()["chapters"][0]["status"] == "done"
+
+
+def test_additive_sol_arbitration_policy_preserves_pending_shadow(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    config = _config(tmp_path)
+
+    def interrupt_after_translation(messages, tier, json_mode):
+        if messages[0]["content"] == FACTUAL_AUDIT_SYSTEM:
+            raise TransientProviderError("pause with pending factual audit")
+        return _handler(messages, tier, json_mode)
+
+    fake = FakeClient(interrupt_after_translation)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+    with pytest.raises(TransientProviderError, match="pending factual audit"):
+        pipeline.run(source, chapters={0})
+
+    store = pipeline.store_for(source)
+    shadow = store.load_shadow(0)
+    shadow["migration_sentinel"] = "preserve-paid-work"
+    shadow["policy_fingerprint"] = pipeline._policy_fingerprint(include_repair_arbitration=False)
+    store.save_shadow(0, shadow)
+
+    _chapter, migrated = pipeline._load_shadow(store, 0)
+
+    assert migrated["migration_sentinel"] == "preserve-paid-work"
+    assert migrated["policy_fingerprint"] == pipeline._policy_fingerprint()
+    event_log = Path(store.event_log_path).read_text(encoding="utf-8")
+    assert "shadow_policy_migrated" in event_log
+    assert "shadow_policy_invalidated" not in event_log
 
 
 def test_chinese_stage_resume_reuses_reader_and_validation_checkpoints(
@@ -428,9 +643,10 @@ def test_chinese_stage_resume_reuses_reader_and_validation_checkpoints(
     config = _config(tmp_path)
     config.pipeline.max_repair_attempts = 1
     reject_language_once = True
+    fail_arbitration_once = True
 
     def unstable(messages, tier, json_mode):
-        nonlocal reject_language_once
+        nonlocal reject_language_once, fail_arbitration_once
         if messages[0]["content"] == FIDELITY_SYSTEM:
             payload = _payload(messages)
             if reject_language_once and any(
@@ -438,33 +654,54 @@ def test_chinese_stage_resume_reuses_reader_and_validation_checkpoints(
                 for row in payload["segments"]
             ):
                 reject_language_once = False
-                return json.dumps(
-                    {"valid": False, "issues": [{"detail": "retry language batch"}]}
-                )
+                return json.dumps({"valid": False, "issues": [{"detail": "retry language batch"}]})
+        if messages[0]["content"] == REPAIR_ARBITRATION_SYSTEM:
+            if fail_arbitration_once:
+                fail_arbitration_once = False
+                raise TransientProviderError("temporary arbitration EOF")
+            payload = _payload(messages)
+            return json.dumps(
+                {
+                    "decision": "accept",
+                    "reason": "候选忠实且比原文自然",
+                    "translations": [
+                        {
+                            "id": row["id"],
+                            "target": row["rejected_candidate_target"],
+                        }
+                        for row in payload["segments"]
+                        if row["scope"] == "WRITE"
+                    ],
+                },
+                ensure_ascii=False,
+            )
         return _handler(messages, tier, json_mode)
 
     fake = FakeClient(unstable)
     pipeline = DirectPipeline(
         config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
     )
-    with pytest.raises(RuntimeError, match="language_repair failed"):
+    with pytest.raises(TransientProviderError, match="temporary arbitration EOF"):
         pipeline.run(source, chapters={0})
 
     reader_calls = sum(
         call["messages"][0]["content"] == CHINESE_READER_SYSTEM for call in fake.calls
     )
     validation_calls = sum(
-        call["messages"][0]["content"] == CHINESE_FINDING_VALIDATION_SYSTEM
-        for call in fake.calls
+        call["messages"][0]["content"] == CHINESE_FINDING_VALIDATION_SYSTEM for call in fake.calls
     )
     pipeline.run(source, chapters={0})
-    assert sum(
-        call["messages"][0]["content"] == CHINESE_READER_SYSTEM for call in fake.calls
-    ) == reader_calls
-    assert sum(
-        call["messages"][0]["content"] == CHINESE_FINDING_VALIDATION_SYSTEM
-        for call in fake.calls
-    ) == validation_calls
+    assert (
+        sum(call["messages"][0]["content"] == CHINESE_READER_SYSTEM for call in fake.calls)
+        == reader_calls
+    )
+    assert (
+        sum(
+            call["messages"][0]["content"] == CHINESE_FINDING_VALIDATION_SYSTEM
+            for call in fake.calls
+        )
+        == validation_calls
+    )
     assert pipeline.store_for(source).load_manifest()["chapters"][0]["status"] == "done"
 
 
@@ -549,9 +786,9 @@ def test_synthetic_speaker_metadata_never_enters_target(tmp_path: Path) -> None:
             )
         ],
     )
-    stable_id = next(iter({
-        segment_id(0, segment): segment.index for segment in chapter.text_segments
-    }))
+    stable_id = next(
+        iter({segment_id(0, segment): segment.index for segment in chapter.text_segments})
+    )
     parsed = pipeline._parse_translations(
         chapter,
         (0,),
@@ -605,9 +842,7 @@ def test_resume_reconciles_completed_promotion_after_manifest_interruption(
         json.dumps(
             {
                 "title": "test",
-                "chapters": [
-                    {"title": "c0", "segments": [{"source": "光った。"}]}
-                ],
+                "chapters": [{"title": "c0", "segments": [{"source": "光った。"}]}],
             },
             ensure_ascii=False,
         ),
@@ -650,9 +885,7 @@ def test_resume_reconciles_completed_promotion_after_manifest_interruption(
     assert chapter_state["task"] == ""
     assert len(fake.calls) == calls_before_resume
     assert Path(export_json(store, tmp_path / "recovered.json")).exists()
-    assert "chapter_promotion_recovered" in Path(store.event_log_path).read_text(
-        encoding="utf-8"
-    )
+    assert "chapter_promotion_recovered" in Path(store.event_log_path).read_text(encoding="utf-8")
 
 
 def test_resume_refuses_done_shadow_when_formal_targets_disagree(tmp_path: Path) -> None:
@@ -661,9 +894,7 @@ def test_resume_refuses_done_shadow_when_formal_targets_disagree(tmp_path: Path)
         json.dumps(
             {
                 "title": "test",
-                "chapters": [
-                    {"title": "c0", "segments": [{"source": "光った。"}]}
-                ],
+                "chapters": [{"title": "c0", "segments": [{"source": "光った。"}]}],
             },
             ensure_ascii=False,
         ),
@@ -806,21 +1037,14 @@ def test_formal_review_uses_existing_text_and_dual_lane_without_retranslation(
     assert "direct_translation" not in stages
     assert "factual_audit" in stages
     assert "chinese_reader_audit" in stages
-    assert all(
-        item["status"] == "done" for item in reviewed.load_manifest()["chapters"]
-    )
-    assert all(
-        reviewed.load_shadow(index)["formal_review"]["baseline_sha256"]
-        for index in (0, 1)
-    )
+    assert all(item["status"] == "done" for item in reviewed.load_manifest()["chapters"])
+    assert all(reviewed.load_shadow(index)["formal_review"]["baseline_sha256"] for index in (0, 1))
     events = [
         json.loads(line)
         for line in Path(reviewed.event_log_path).read_text(encoding="utf-8").splitlines()
     ]
     assert any(row["event"] == "formal_review_opened" for row in events)
-    assert any(
-        row["event"] == "formal_review_parallel_pair_started" for row in events
-    )
+    assert any(row["event"] == "formal_review_parallel_pair_started" for row in events)
 
     calls_after_review = len(fake.calls)
     pipeline.review_formal(source, parallel=True)
@@ -839,8 +1063,7 @@ def test_formal_review_archives_unfinished_legacy_shadow_when_formal_exists(
     )
     store = pipeline.run(source)
     formal_targets = {
-        str(segment.index): segment.target or ""
-        for segment in store.load_chapter(0).segments
+        str(segment.index): segment.target or "" for segment in store.load_chapter(0).segments
     }
     legacy_shadow = {
         "schema": 1,
@@ -983,9 +1206,10 @@ def test_parallel_pipeline_really_overlaps_and_defers_future_terms(tmp_path: Pat
         and event.chapters == (0, 1)
         for event in progress_events
     )
-    assert {
-        event.chapter for event in progress_events if event.kind == "chapter_completed"
-    } == {0, 1}
+    assert {event.chapter for event in progress_events if event.kind == "chapter_completed"} == {
+        0,
+        1,
+    }
 
 
 def test_cli_exposes_one_stage_command_and_parallel_flag() -> None:

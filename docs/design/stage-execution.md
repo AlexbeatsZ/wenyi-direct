@@ -8,7 +8,7 @@ The persisted chapter state has six executable stages:
 |---|---|---|
 | `translate` | a pending chapter | complete direct Shadow text |
 | `factual-audit` | translated Shadow | checkpointed findings and term candidates |
-| `factual-repair` | complete factual audit | source-validated factual snapshot |
+| `factual-repair` | complete factual audit | source-adjudicated factual snapshot |
 | `chinese-audit` | factual snapshot | Chinese-only findings plus source validation |
 | `chinese-repair` | complete Chinese audit | source-validated language repairs |
 | `promote` | reviewed Shadow | atomic Formal replacement |
@@ -55,6 +55,23 @@ validator or process fails after the repair model has returned, resume validates
 same persisted proposal instead of paying for and potentially changing the repair a
 second time. An accepted proposal is checkpointed before its region is committed, so
 the final small commit window is resumable without another model call as well.
+
+The Sol repair role is not subordinate to the Gemini finding. On its first call it
+may return `reject_finding` with a source-based reason; the region then keeps its
+pre-repair target and continues without a Gemini fidelity call. If Sol proposes a
+repair and bounded Gemini validation still disagrees, Wenyi Direct persists an
+`arbitration_required` checkpoint and gives Sol one final source-aware arbitration
+call containing the original finding, rejected candidate, and latest validation
+feedback. Sol may `accept` a final translation or `skip` the region. Its accepted
+semantic ruling is not sent back into the same disagreement loop; deterministic
+active-hard terminology checks still apply. A skip is an explicit completed result,
+not a stage failure, and is recorded in the Shadow and audit artifacts.
+
+Latest validation feedback replaces conflicting old audit wording in subsequent
+repair prompts. Legacy pending proposals are preserved: the additive arbitration
+policy fingerprint migrates in place, then the stored proposal is validated once
+before any arbitration. Provider/runtime failures during arbitration remain ordinary
+resumable interruptions and do not silently become content skips.
 
 ## Two-lane parallel mode
 
@@ -103,11 +120,12 @@ through the same stage dispatcher. Formal text changes only in `promote`.
 CLI providers retry only recognized transient transport/runtime failures according
 to `max_retries`. If those retries are exhausted and
 `roles.content_policy_fallback` is configured, the same request is sent to that
-fallback. Explicit CLI quota exhaustion and repeated malformed JSON also route to
-the fallback only after primary retries are exhausted. Permanent authentication,
-configuration, alignment, and quality-gate failures remain explicit errors. An
-explicit timeout is always transient, including authentication flows that time out;
-an authentication failure without a timeout remains permanent.
+fallback. Repeated malformed JSON also routes to the fallback only after primary
+retries are exhausted. Codex's explicit `You've hit your usage limit` response is a
+permanent runtime interruption: it is neither retried nor sent to the fallback.
+Permanent authentication, configuration, alignment, and quality-gate failures remain
+explicit errors. An explicit timeout is always transient, including authentication
+flows that time out; an authentication failure without a timeout remains permanent.
 
 Promotion uses the persisted `done` Shadow as its commit marker. If the process exits
 after the Formal chapter and done Shadow are saved but before the manifest status is
