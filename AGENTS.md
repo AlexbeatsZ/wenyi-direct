@@ -28,6 +28,16 @@ or atomic Formal promotion.
 - Granular stages and true two-thread chapter staggering are implemented.
 - Shared progress events and live audit JSON are implemented for sequential,
   two-lane, Formal-review, and independent-stage execution.
+- The live Satisfaction review is currently blocked in chapter 9 factual repair,
+  region `factual-r11` (`ch9:s107`): the factual audit requires `初老` to become
+  `中年`, while fidelity validation repeatedly rejects `中年` and asks for
+  `上了年纪`. Because an exhausted `retry` checkpoint restarts attempts at one on
+  the next invocation, this disagreement repeats four paid repair/validation pairs
+  per run instead of reaching an explicit adjudication state. Formal chapter 9 has
+  not been replaced.
+- Codex CLI quota fallback misses the real `You've hit your usage limit` wording.
+  The classifier recognizes `quota exceeded` but treats this current CLI message as
+  a permanent `RuntimeError`, so the configured DeepSeek fallback is bypassed.
 - The abandoned `agent/stage-commands-and-staggered-pipeline` branch is not the
   canonical implementation and must not be merged wholesale.
 
@@ -109,3 +119,11 @@ promotion to the final text.
 - Legacy Formal states may lack `source_sha256`. Backfill it only after reparsing the
   current source and matching every chapter/segment index, source, kind, and anchor;
   never bypass the source-change guard with a blind manifest edit.
+- A repair audit and its fidelity validator can disagree about the source meaning.
+  Passing both assertions to the repair model is not enough: if the validator keeps
+  rejecting the audit-required wording, per-run attempt reset creates an unbounded
+  cross-invocation loop. Persist an exhausted/conflict state or otherwise require
+  explicit adjudication before issuing more paid calls.
+- Provider failure tests must use exact current CLI wording captured from live runs.
+  Generic markers such as `quota exceeded` do not cover Codex's current
+  `You've hit your usage limit` response and therefore do not prove fallback works.
