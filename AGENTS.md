@@ -33,13 +33,12 @@ or atomic Formal promotion.
 - Granular stages and true two-thread chapter staggering are implemented.
 - Shared progress events and live audit JSON are implemented for sequential,
   two-lane, Formal-review, and independent-stage execution.
-- The live Satisfaction review is 90 done / 2 pending. Chapter 66 is paused in
-  Chinese repair region `language-b2` after Sol twice left or duplicated a writable
-  output slot while restructuring `ch66:s164-s166`; completed regions `language-b0`
-  and `language-b1` remain checkpointed, and Formal chapter 66 is untouched.
-- Chapter 67 has completed factual audit and waits at factual repair. The next paid
-  resume first migrates chapter 66's pre-alignment policy fingerprint additively,
-  then retries `language-b2` without repeating its completed regions.
+- The live Satisfaction review is 90 done / 2 pending. Chapter 71 is paused in
+  Chinese audit and chapter 72 in factual audit; both Formal chapters are untouched.
+- The current Gemini-compatible API does not support concurrent requests. During a
+  parallel pair, chapter 72 factual batch 0 was persisted, but the same chapter 72
+  response reached chapter 71's Chinese audit and failed its stable-ID boundary.
+  Resume must use explicit CLI `--sequential`; `review` defaults to parallel.
 - Codex's exact `You've hit your usage limit` response intentionally interrupts
   immediately without retry or fallback.
 - The abandoned `agent/stage-commands-and-staggered-pipeline` branch is not the
