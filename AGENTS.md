@@ -24,6 +24,8 @@ or atomic Formal promotion.
 - Sol may veto a Gemini finding on the first repair call. After bounded validation
   disagreement, one persisted Sol final arbitration accepts a fidelity-safe result
   or skips the region while retaining the pre-repair target.
+- Repair and arbitration prompts require every writable stable ID exactly once with
+  a non-empty target; the stricter contract migrates old pending Shadows in place.
 - Detailed scheduling and concurrency rules: `docs/design/stage-execution.md`.
 
 ## Active Work
@@ -31,10 +33,13 @@ or atomic Formal promotion.
 - Granular stages and true two-thread chapter staggering are implemented.
 - Shared progress events and live audit JSON are implemented for sequential,
   two-lane, Formal-review, and independent-stage execution.
-- The live Satisfaction review remains pending in chapter 9 factual repair, region
-  `factual-r11` (`ch9:s107`). Its persisted proposal is intentionally untouched;
-  after deployment it resumes at validation and then enters one Sol arbitration if
-  Gemini still rejects it. Formal chapter 9 has not been replaced.
+- The live Satisfaction review is 90 done / 2 pending. Chapter 66 is paused in
+  Chinese repair region `language-b2` after Sol twice left or duplicated a writable
+  output slot while restructuring `ch66:s164-s166`; completed regions `language-b0`
+  and `language-b1` remain checkpointed, and Formal chapter 66 is untouched.
+- Chapter 67 has completed factual audit and waits at factual repair. The next paid
+  resume first migrates chapter 66's pre-alignment policy fingerprint additively,
+  then retries `language-b2` without repeating its completed regions.
 - Codex's exact `You've hit your usage limit` response intentionally interrupts
   immediately without retry or fallback.
 - The abandoned `agent/stage-commands-and-staggered-pipeline` branch is not the
@@ -114,6 +119,11 @@ promotion to the final text.
 - Persist a repair proposal in Shadow before fidelity validation and mark an
   accepted proposal before returning it to the caller. Otherwise a validator or
   process interruption repeats an already paid repair call on resume.
+- Cross-segment rewriting must not express a merge by returning an empty target:
+  every writable stable ID remains a non-empty output slot. Tightening that model
+  contract changes the policy fingerprint, so recognize the exact previous prompt
+  fingerprint as an additive migration or an in-progress review will discard paid
+  audit and accepted-region checkpoints.
 - Formal is saved before the manifest is marked done, so a process exit may leave a
   done Shadow beside a pending manifest. Treat the done Shadow as the commit marker
   only after its complete stable-ID set and every translated target exactly match

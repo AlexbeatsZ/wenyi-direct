@@ -73,6 +73,12 @@ policy fingerprint migrates in place, then the stored proposal is validated once
 before any arbitration. Provider/runtime failures during arbitration remain ordinary
 resumable interruptions and do not silently become content skips.
 
+Repair and final-arbitration responses must return every writable stable ID exactly
+once, in order, with a non-empty target. Cross-segment rewriting may redistribute
+wording but may not merge output slots by leaving one target empty. This stricter
+response contract is an additive policy migration: existing audit, accepted-region,
+and proposal checkpoints are preserved instead of restarting paid stages.
+
 ## Two-lane parallel mode
 
 `translate --parallel` pipelines adjacent chapters with a one-chapter offset:

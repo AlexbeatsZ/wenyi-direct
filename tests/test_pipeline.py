@@ -511,6 +511,8 @@ def test_latest_validation_feedback_supersedes_conflicting_audit_requirement() -
 
     payload = _payload(messages)
     assert payload["required_output"]["decision"] == "repair 或 reject_finding"
+    assert "非空" in payload["required_output"]["alignment_rule"]
+    assert "空字符串" in REPAIR_SYSTEM
     assert payload["required_output"]["reject_rule"]
     assert payload["issues"][0]["detail"] == "中年过轻，应表达初入老年"
     assert payload["issues"][0]["required_meaning"] == "上了年纪的男子"
@@ -632,6 +634,42 @@ def test_additive_sol_arbitration_policy_preserves_pending_shadow(
     assert migrated["policy_fingerprint"] == pipeline._policy_fingerprint()
     event_log = Path(store.event_log_path).read_text(encoding="utf-8")
     assert "shadow_policy_migrated" in event_log
+    assert "shadow_policy_invalidated" not in event_log
+
+
+def test_additive_repair_alignment_policy_preserves_pending_shadow(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "book.json"
+    _write_book(source)
+    config = _config(tmp_path)
+
+    def interrupt_after_translation(messages, tier, json_mode):
+        if messages[0]["content"] == FACTUAL_AUDIT_SYSTEM:
+            raise TransientProviderError("pause with pending factual audit")
+        return _handler(messages, tier, json_mode)
+
+    fake = FakeClient(interrupt_after_translation)
+    pipeline = DirectPipeline(
+        config, {role: fake for role in config.roles.model_dump()}, config_dir=tmp_path
+    )
+    with pytest.raises(TransientProviderError, match="pending factual audit"):
+        pipeline.run(source, chapters={0})
+
+    store = pipeline.store_for(source)
+    shadow = store.load_shadow(0)
+    shadow["migration_sentinel"] = "preserve-paid-work"
+    shadow["policy_fingerprint"] = pipeline._policy_fingerprint(
+        include_repair_output_alignment=False
+    )
+    store.save_shadow(0, shadow)
+
+    _chapter, migrated = pipeline._load_shadow(store, 0)
+
+    assert migrated["migration_sentinel"] == "preserve-paid-work"
+    assert migrated["policy_fingerprint"] == pipeline._policy_fingerprint()
+    event_log = Path(store.event_log_path).read_text(encoding="utf-8")
+    assert "additive_repair_output_alignment" in event_log
     assert "shadow_policy_invalidated" not in event_log
 
 
@@ -802,6 +840,68 @@ def test_synthetic_speaker_metadata_never_enters_target(tmp_path: Path) -> None:
         },
     )
     assert parsed == {0: "「等等」"}
+
+
+def test_translation_alignment_reports_precise_item_failure(tmp_path: Path) -> None:
+    pipeline = DirectPipeline(_config(tmp_path), {}, config_dir=tmp_path)
+    chapter = Chapter(
+        index=66,
+        title="章",
+        segments=[Segment(index=index, source=f"source-{index}") for index in range(167)],
+    )
+    stable_ids = [segment_id(66, chapter.segments[index]) for index in (164, 165, 166)]
+
+    with pytest.raises(AlignmentError, match="empty translation target"):
+        pipeline._parse_translations(
+            chapter,
+            (164, 165, 166),
+            {
+                "translations": [
+                    {"id": stable_ids[0], "target": "完整句。"},
+                    {"id": stable_ids[1], "target": "台词。"},
+                    {"id": stable_ids[2], "target": "   "},
+                ]
+            },
+        )
+
+    with pytest.raises(AlignmentError, match="translation target must be a string"):
+        pipeline._parse_translations(
+            chapter,
+            (164, 165, 166),
+            {
+                "translations": [
+                    {"id": stable_ids[0], "target": "完整句。"},
+                    {"id": stable_ids[1], "target": "台词。"},
+                    {"id": stable_ids[2], "target": None},
+                ]
+            },
+        )
+
+    with pytest.raises(AlignmentError, match="duplicate translation ID"):
+        pipeline._parse_translations(
+            chapter,
+            (164, 165, 166),
+            {
+                "translations": [
+                    {"id": stable_ids[0], "target": "完整句。"},
+                    {"id": stable_ids[1], "target": "台词。"},
+                    {"id": stable_ids[1], "target": "她喊道。"},
+                ]
+            },
+        )
+
+    with pytest.raises(AlignmentError, match="unknown translation ID"):
+        pipeline._parse_translations(
+            chapter,
+            (164, 165, 166),
+            {
+                "translations": [
+                    {"id": stable_ids[0], "target": "完整句。"},
+                    {"id": stable_ids[1], "target": "台词。"},
+                    {"id": "ch66:s999:invented", "target": "她喊道。"},
+                ]
+            },
+        )
 
 
 def test_cli_prepare_and_status_need_no_model_credentials(tmp_path: Path) -> None:

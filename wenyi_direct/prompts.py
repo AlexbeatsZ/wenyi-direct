@@ -24,13 +24,19 @@ FACTUAL_AUDIT_SYSTEM = """你是文学翻译的事实审校员。逐项比较原
 LEGACY_REPAIR_SYSTEM = """你是文学翻译修复者。根据给出的审校问题，在完整修复区域内统一改写。
 先重新理解区域原文及邻近上下文，再写自然中文；不要只替换被点名的词。active hard 术语必须采用，preferred 仅供参考；若审校反馈把 preferred 误当成强制要求，必须以当前源文语义为准。只能输出允许写入的稳定 ID，数量必须完全一致。"""
 
-REPAIR_SYSTEM = """你是有独立判断权的文学翻译修复者。先依据完整可见源文判断审校意见是否成立，裁决优先级是：源文忠实度 > 信息完整性 > 中文流畅度。
+PRE_ALIGNMENT_REPAIR_SYSTEM = """你是有独立判断权的文学翻译修复者。先依据完整可见源文判断审校意见是否成立，裁决优先级是：源文忠实度 > 信息完整性 > 中文流畅度。
 若审校意见成立，decision=repair，在完整修复区域内统一改写；不要只替换被点名的词。若审校意见与源文冲突或会损害忠实度，你有权 decision=reject_finding，给出基于源文的 reason，translations 必须为空，保留修复前文本。
 active hard 术语必须采用，preferred 仅供参考；若审校反馈把 preferred 误当成强制要求，必须以当前源文语义为准。decision=repair 时只能输出允许写入的稳定 ID，数量必须完全一致。只能使用 repair 或 reject_finding。"""
 
-REPAIR_ARBITRATION_SYSTEM = """你是文学翻译冲突的最终裁决者。只有常规修复与独立忠实度验证连续无法达成一致时才会调用你。
+REPAIR_SYSTEM = PRE_ALIGNMENT_REPAIR_SYSTEM + """
+decision=repair 时，每个 required_output 中的稳定 ID 必须按原顺序恰好返回一次，target 必须是非空的完整中文字符串。跨段重组只能调整各 target 的表达，不能删除、合并输出槽位或用空字符串占位；无需改写的槽位也必须原样返回 current_target，不得留空。"""
+
+PRE_ALIGNMENT_REPAIR_ARBITRATION_SYSTEM = """你是文学翻译冲突的最终裁决者。只有常规修复与独立忠实度验证连续无法达成一致时才会调用你。
 裁决优先级不可颠倒：源文忠实度 > 信息完整性 > 中文流畅度。你能同时看到源文、初始审校结论、当前候选和验证反馈，必须重新依据源文独立判断，不得机械服从任何一方。
 若能确定忠实且完整的最终表达，decision=accept，并为每个允许写入的稳定 ID 返回完整中文；该结果是最终语义裁决，不再交回原验证模型。若无法在不损害忠实度的前提下确定修改，decision=skip，translations 必须为空，保留本轮修复前文本。只能使用 accept 或 skip，不得提出继续讨论或再次重试。"""
+
+REPAIR_ARBITRATION_SYSTEM = PRE_ALIGNMENT_REPAIR_ARBITRATION_SYSTEM + """
+decision=accept 时，每个 required_output 中的稳定 ID 必须按原顺序恰好返回一次，target 必须是非空的完整中文字符串。跨段重组只能调整各 target 的表达，不能删除、合并输出槽位或用空字符串占位；若无法在这些边界内作出安全裁决，应使用 skip。"""
 
 FIDELITY_SYSTEM = """你是严格的源文忠实度验证员。逐一检查每个 changed=true 的稳定 ID，判断候选中文是否在给定上下文中准确、完整，且没有凭空增加事实；任何一个 changed ID 不合格，整体 valid 必须为 false。
 自然的中文重组不是错误。检查 active hard 术语和代词提示；preferred 只是历史译法建议，不是质量门，不得仅因候选未采用 preferred 就判为不合格或要求改回。只有当前源文证据或 active hard 规则能构成术语类否决依据。若不合格，给出可以直接指导下一次修复的简短问题。"""
@@ -324,6 +330,10 @@ def repair_messages(
                 }
                 for index in write_indexes
             ],
+            "alignment_rule": (
+                "decision=repair 时须按上述顺序逐项返回，每个 id 恰好一次且 target "
+                "为非空完整中文；跨段重组不得删除、合并输出槽位或留空"
+            ),
             "reject_rule": "decision=reject_finding 时 translations 必须为空",
         },
     }
@@ -376,6 +386,10 @@ def repair_arbitration_messages(
                 }
                 for index in write_indexes
             ],
+            "alignment_rule": (
+                "decision=accept 时须按上述顺序逐项返回，每个 id 恰好一次且 target "
+                "为非空完整中文；跨段重组不得删除、合并输出槽位或留空"
+            ),
             "skip_rule": "decision=skip 时 translations 必须为空",
         },
     }

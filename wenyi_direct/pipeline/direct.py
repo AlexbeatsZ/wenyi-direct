@@ -23,6 +23,8 @@ from ..prompts import (
     FACTUAL_AUDIT_SYSTEM,
     FIDELITY_SYSTEM,
     LEGACY_REPAIR_SYSTEM,
+    PRE_ALIGNMENT_REPAIR_ARBITRATION_SYSTEM,
+    PRE_ALIGNMENT_REPAIR_SYSTEM,
     REPAIR_ARBITRATION_SYSTEM,
     REPAIR_SYSTEM,
     TRANSLATION_SYSTEM,
@@ -42,7 +44,7 @@ from .window import WindowPlanner, split_write_scope
 
 
 class AlignmentError(RuntimeError):
-    """A structured response omitted, duplicated, or invented stable IDs."""
+    """A structured response violated stable-ID or non-empty-target alignment."""
 
 
 class StageTaskError(RuntimeError):
@@ -634,11 +636,16 @@ class DirectPipeline:
             return chapter, shadow
         current_policy = self._policy_fingerprint()
         legacy_policy = self._policy_fingerprint(include_repair_arbitration=False)
-        if (
-            shadow
-            and legacy_policy != current_policy
-            and shadow.get("policy_fingerprint") == legacy_policy
-        ):
+        pre_alignment_policy = self._policy_fingerprint(
+            include_repair_output_alignment=False
+        )
+        additive_migrations = {
+            legacy_policy: "additive_repair_arbitration",
+            pre_alignment_policy: "additive_repair_output_alignment",
+        }
+        previous_policy = shadow.get("policy_fingerprint") if shadow else None
+        migration = additive_migrations.get(previous_policy)
+        if shadow and previous_policy != current_policy and migration:
             previous_policy = shadow.get("policy_fingerprint")
             self._save_shadow(store, chapter.index, shadow)
             store.log_event(
@@ -646,7 +653,7 @@ class DirectPipeline:
                 chapter=chapter.index,
                 previous_policy=previous_policy,
                 current_policy=current_policy,
-                migration="additive_repair_arbitration",
+                migration=migration,
             )
         elif shadow and shadow.get("policy_fingerprint") not in {None, current_policy}:
             expected = {segment_id(chapter.index, segment) for segment in chapter.text_segments}
@@ -865,18 +872,35 @@ class DirectPipeline:
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         return f"{stage}-{hashlib.sha256(encoded).hexdigest()[:16]}"
 
-    def _policy_fingerprint(self, *, include_repair_arbitration: bool = True) -> str:
+    def _policy_fingerprint(
+        self,
+        *,
+        include_repair_arbitration: bool = True,
+        include_repair_output_alignment: bool = True,
+    ) -> str:
         with self._terminology_lock:
+            if include_repair_arbitration:
+                repair_prompt = (
+                    REPAIR_SYSTEM
+                    if include_repair_output_alignment
+                    else PRE_ALIGNMENT_REPAIR_SYSTEM
+                )
+            else:
+                repair_prompt = LEGACY_REPAIR_SYSTEM
             prompts = [
                 TRANSLATION_SYSTEM,
                 FACTUAL_AUDIT_SYSTEM,
                 CHINESE_READER_SYSTEM,
                 CHINESE_FINDING_VALIDATION_SYSTEM,
-                REPAIR_SYSTEM if include_repair_arbitration else LEGACY_REPAIR_SYSTEM,
+                repair_prompt,
                 FIDELITY_SYSTEM,
             ]
             if include_repair_arbitration:
-                prompts.append(REPAIR_ARBITRATION_SYSTEM)
+                prompts.append(
+                    REPAIR_ARBITRATION_SYSTEM
+                    if include_repair_output_alignment
+                    else PRE_ALIGNMENT_REPAIR_ARBITRATION_SYSTEM
+                )
             payload = {
                 "config": self.config.model_dump(mode="json"),
                 "terminology": self.terminology.document.model_dump(mode="json"),
@@ -2183,9 +2207,18 @@ class DirectPipeline:
             if not isinstance(item, dict):
                 raise AlignmentError("translation item must be an object")
             stable_id = str(item.get("id", ""))
-            target = _clean_target_control_metadata(str(item.get("target", "")))
-            if stable_id not in expected or stable_id in seen or not target:
-                raise AlignmentError(f"invalid translation item for id {stable_id!r}")
+            if stable_id not in expected:
+                raise AlignmentError(f"unknown translation ID: {stable_id!r}")
+            if stable_id in seen:
+                raise AlignmentError(f"duplicate translation ID: {stable_id!r}")
+            raw_target = item.get("target")
+            if not isinstance(raw_target, str):
+                raise AlignmentError(
+                    f"translation target must be a string for id {stable_id!r}"
+                )
+            target = _clean_target_control_metadata(raw_target)
+            if not target:
+                raise AlignmentError(f"empty translation target for id {stable_id!r}")
             seen.add(stable_id)
             result[expected[stable_id]] = target
         if seen != set(expected):
