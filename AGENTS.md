@@ -30,6 +30,7 @@ or atomic Formal promotion.
 - Reusable routes and per-route models live separately in one user-level catalog;
   project YAML is sparse and `use ROLE ROUTE MODEL` or one-run overrides select both
   aliases. Detailed rules: `docs/design/model-configuration.md`.
+- Public usage documentation is bilingual: `README.md` and `README.zh-CN.md`.
 
 ## Active Work
 

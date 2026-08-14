@@ -1,5 +1,7 @@
 # Kamyi
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Kamyi is a chapter-first literary translation pipeline for EPUB, FB2, TXT,
 Markdown, HTML, PDF, and the documented JSON interchange format. It translates a
 chapter directly, audits factual fidelity, reviews the Chinese reading experience,
