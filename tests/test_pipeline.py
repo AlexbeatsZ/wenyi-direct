@@ -904,12 +904,31 @@ def test_translation_alignment_reports_precise_item_failure(tmp_path: Path) -> N
         )
 
 
-def test_cli_prepare_and_status_need_no_model_credentials(tmp_path: Path) -> None:
+def test_cli_prepare_and_status_need_no_model_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = tmp_path / "book.json"
     _write_book(source)
+    models_path = tmp_path / "models.yaml"
+    models_path.write_text(
+        """routes:
+  test:
+    transport: fake
+    models:
+      fake: {model: fake}
+roles:
+  translate: {route: test, model: fake}
+  factual_audit: {route: test, model: fake}
+  chinese_audit: {route: test, model: fake}
+  repair: {route: test, model: fake}
+  validation: {route: test, model: fake}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WENYI_DIRECT_MODELS", str(models_path))
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        """providers:\n  default:\n    provider: fake\npaths:\n  state_dir: state\n""",
+        "paths:\n  state_dir: state\n",
         encoding="utf-8",
     )
     runner = CliRunner()

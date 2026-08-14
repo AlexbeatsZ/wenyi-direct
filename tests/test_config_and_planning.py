@@ -104,11 +104,11 @@ def test_sparse_project_config_uses_central_models_and_cli_overrides(tmp_path: P
   first-route:
     transport: fake
     models:
-      first-model: {model: first-upstream, runtime_name: first}
+      first-model: {model: first-upstream}
   second-route:
     transport: fake
     models:
-      second-model: {model: second-upstream, runtime_name: second}
+      second-model: {model: second-upstream}
 roles:
   translate: {route: first-route, model: first-model}
   factual_audit: {route: first-route, model: first-model}
@@ -130,14 +130,14 @@ roles:
         ],
     )
 
-    assert config.roles.translate == "first"
-    assert config.roles.factual_audit == "second"
-    assert config.roles.chinese_audit == "second"
-    assert config.roles.repair == "second"
-    assert config.roles.validation == "first"
+    assert config.roles.translate == "first-route::first-model"
+    assert config.roles.factual_audit == "second-route::second-model"
+    assert config.roles.chinese_audit == "second-route::second-model"
+    assert config.roles.repair == "second-route::second-model"
+    assert config.roles.validation == "first-route::first-model"
 
 
-def test_legacy_self_contained_config_does_not_inherit_central_roles(tmp_path: Path) -> None:
+def test_old_model_configuration_forms_are_rejected(tmp_path: Path) -> None:
     models = tmp_path / "models.yaml"
     models.write_text(
         """providers:
@@ -154,22 +154,45 @@ roles:
 """,
         encoding="utf-8",
     )
-    project = tmp_path / "legacy.yaml"
+    project = tmp_path / "project.yaml"
+    project.write_text("language: {source: ja, target: zh-CN}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="routes"):
+        Config.load(project, models_path=models)
+
     project.write_text("providers:\n  default: {provider: fake}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="must not define providers"):
+        Config.load(project)
 
-    config = Config.load(project, models_path=models)
 
-    assert config.roles.translate == "default"
-    assert config.roles.repair == "default"
-
-    overridden = Config.load(
-        project,
-        models_path=models,
-        model_overrides=["repair=central/central"],
+def test_route_and_model_are_always_both_required(tmp_path: Path) -> None:
+    models = tmp_path / "models.yaml"
+    models.write_text(
+        """routes:
+  route-a:
+    transport: fake
+    models:
+      model-a: {model: upstream-a}
+roles:
+  translate: {route: route-a, model: model-a}
+  factual_audit: {route: route-a, model: model-a}
+  chinese_audit: {route: route-a, model: model-a}
+  repair: {route: route-a, model: model-a}
+  validation: {route: route-a, model: model-a}
+""",
+        encoding="utf-8",
     )
-    assert overridden.roles.translate == "default"
-    assert overridden.roles.repair == "central"
-    assert set(overridden.providers) == {"default", "central"}
+    project = tmp_path / "project.yaml"
+    project.write_text("roles:\n  repair: model-a\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="valid dictionary"):
+        Config.load(project, models_path=models)
+
+    project.write_text("language: {source: ja, target: zh-CN}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="ROLE=ROUTE/MODEL"):
+        Config.load(
+            project,
+            models_path=models,
+            model_overrides=["repair=model-a"],
+        )
 
 
 def test_models_cli_persists_role_groups_in_one_catalog(tmp_path: Path) -> None:
@@ -192,7 +215,20 @@ def test_models_cli_persists_role_groups_in_one_catalog(tmp_path: Path) -> None:
     assert switched.exit_code == 0
     assert "translate -> deepseek-api / deepseek-v4-flash" in switched.output
 
-    alias_switched = runner.invoke(
+    audit_switched = runner.invoke(
+        app,
+        [
+            "use",
+            "audit",
+            "deepseek-api",
+            "deepseek-v4-flash",
+            "--models",
+            str(models),
+        ],
+    )
+    assert audit_switched.exit_code == 0
+
+    old_alias = runner.invoke(
         app,
         [
             "models",
@@ -204,7 +240,7 @@ def test_models_cli_persists_role_groups_in_one_catalog(tmp_path: Path) -> None:
             str(models),
         ],
     )
-    assert alias_switched.exit_code == 0
+    assert old_alias.exit_code != 0
 
     project = tmp_path / "project.yaml"
     project.write_text("language: {source: ja, target: zh-CN}\n", encoding="utf-8")
@@ -212,7 +248,7 @@ def test_models_cli_persists_role_groups_in_one_catalog(tmp_path: Path) -> None:
     assert config.roles.translate == "deepseek-api::deepseek-v4-flash"
     assert config.roles.factual_audit == "deepseek-api::deepseek-v4-flash"
     assert config.roles.chinese_audit == "deepseek-api::deepseek-v4-flash"
-    assert config.roles.repair == "codex_sol"
+    assert config.roles.repair == "codex::gpt-5.6-sol-high"
     flash = config.providers["deepseek-api::deepseek-v4-flash"]
     assert flash.provider == "openai-compatible"
     assert flash.tiers["strong"].model == "deepseek-v4-flash"

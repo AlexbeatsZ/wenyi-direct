@@ -36,19 +36,16 @@ or atomic Formal promotion.
 - Granular stages and true two-thread chapter staggering are implemented.
 - Shared progress events and live audit JSON are implemented for sequential,
   two-lane, Formal-review, and independent-stage execution.
-- The live Satisfaction review is 90 done / 2 pending. Chapter 71 is paused in
-  Chinese audit and chapter 72 in factual audit; both Formal chapters are untouched.
-- The current Gemini-compatible API does not support concurrent requests. During a
-  parallel pair, chapter 72 factual batch 0 was persisted, but the same chapter 72
-  response reached chapter 71's Chinese audit and failed its stable-ID boundary.
-  Resume must use explicit CLI `--sequential`; `review` defaults to parallel.
+- The live Satisfaction review is 92/92 complete as verified by the CLI on
+  2026-08-14; all current Shadows are done, so there is no in-progress review
+  checkpoint that depends on the removed runtime aliases.
 - The live Satisfaction review keeps only book-specific settings in
   `C:/Users/Meta/Project/Workspaces/Satisfaction/config.wenyi-direct.yaml` and
   inherits `%APPDATA%/wenyi-direct/models.yaml`: `translate`/`factual_audit`/
   `chinese_audit`/`validation` select `deepseek-api/deepseek-v4-pro-max`;
-  `repair` selects `codex/gpt-5.6-sol-high`. The route/model schema migration keeps
-  the materialized runtime configuration identical after canonical JSON
-  serialization, so existing review policy fingerprints remain valid.
+  `repair` selects `codex/gpt-5.6-sol-high`. The catalog accepts only the canonical
+  `routes -> models` schema; project providers, string-only model references,
+  compatibility command aliases, and hidden runtime aliases are not supported.
 - Codex's exact `You've hit your usage limit` response intentionally interrupts
   immediately without retry or fallback.
 - The abandoned `agent/stage-commands-and-staggered-pipeline` branch is not the
@@ -154,5 +151,5 @@ promotion to the final text.
   names. Keep user-named routes and their user-named models as separate levels in
   `models.yaml`; select both with `use ROLE ROUTE MODEL`. Use project `roles` only
   for a deliberate exception and one-run `--model ROLE=ROUTE/MODEL` for experiments.
-  When migrating active resumable work, prove the fully resolved
-  `Config.model_dump()` is unchanged so paid checkpoints are not invalidated.
+  Reject noncanonical model configuration instead of guessing or migrating it;
+  materialized runtime identities are always `ROUTE::MODEL`.

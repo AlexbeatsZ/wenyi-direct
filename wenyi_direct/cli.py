@@ -170,17 +170,6 @@ def use_route(
     _persist_route_selection(role, route, model, models)
 
 
-@models_app.command("use")
-def use_model(
-    role: str = typer.Argument(..., help="Stage role or group: audit, repair, validation, all."),
-    route: str = typer.Argument(..., help="Custom route name, such as deepseek-api."),
-    model: str = typer.Argument(..., help="Custom model name available on that route."),
-    models: Path | None = typer.Option(None, "--models", help="Central models.yaml path."),
-) -> None:
-    """Alias of the top-level `use ROLE ROUTE MODEL` command."""
-    _persist_route_selection(role, route, model, models)
-
-
 @app.command()
 def prepare(
     source: Path = typer.Argument(..., exists=True, dir_okay=False),

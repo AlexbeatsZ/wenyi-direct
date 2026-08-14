@@ -33,19 +33,17 @@ The default catalog is `%APPDATA%/wenyi-direct/models.yaml` on Windows and
 elsewhere. `WENYI_DIRECT_MODELS` or the model-management command's `--models` option
 may select another catalog for portable/test environments.
 
-Resolution order is:
+When the user catalog exists, it is authoritative and is not merged with hidden
+built-in entries. The built-in catalog is used only when no user catalog exists and
+is what `models init` writes. Resolution order is:
 
-1. built-in safe routes/models;
-2. the user `models.yaml` route definitions, model aliases, and default selections;
-3. optional project `providers`/`roles` for backward compatibility or an explicit
-   project exception;
-4. repeatable one-run `--model ROLE=ROUTE/MODEL` CLI overrides.
+1. the complete user `models.yaml` catalog, or the built-in catalog when absent;
+2. optional project `roles` entries, each containing both `route` and `model`;
+3. repeatable one-run `--model ROLE=ROUTE/MODEL` CLI overrides.
 
-A legacy project file containing its own `providers` remains self-contained: absent
-roles retain the historical `default` mapping instead of unexpectedly inheriting a
-new global role selection. The first profile-based user-catalog schema is migrated
-in memory. A sparse project file with no `providers` inherits the central routes,
-models, and role selections.
+Only the `routes -> models` catalog schema is accepted. Project YAML cannot define
+connections, and old `providers`, string-only role values, short model references,
+and implicit schema migration are rejected rather than interpreted.
 
 ## Commands
 
@@ -61,12 +59,11 @@ uv run wenyi-direct review book.epub --model audit=web2api/gemini-3.1-pro --mode
 ```
 
 `audit` changes both `factual_audit` and `chinese_audit`. Individual logical roles,
-`fallback`, and `all` are also accepted. `models use` is a compatibility alias for
-the top-level `use` command. The pipeline still owns the information boundaries:
-switching a route/model changes routing only, never which prompt/context that role
-may see.
+`fallback`, and `all` are also accepted. The pipeline still owns the information
+boundaries: switching a route/model changes routing only, never which prompt/context
+that role may see.
 
 The central writer saves atomically and stores only API-key environment-variable
-names, never key values. `init-config` and `models init` are non-destructive. Hidden
-`runtime_name` fields exist only for additive migration of active resumable work;
-ordinary route/model aliases do not need them.
+names, never key values. `init-config` and `models init` are non-destructive.
+Materialized runtime identities are deterministically `ROUTE::MODEL`; there is no
+third alias layer.

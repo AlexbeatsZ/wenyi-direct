@@ -57,8 +57,9 @@ uv run wenyi-direct review path\to\book.epub --model audit=web2api/gemini-3.1-pr
 
 `audit` is a shortcut for both factual and Chinese-reader audit roles. `translate`,
 `factual-audit`, `chinese-audit`, `repair`, `validation`, `fallback`, and `all` may
-also be selected directly. `models use ROLE ROUTE MODEL` remains an alias of the
-shorter top-level command. Route and model names are user-defined YAML keys. See
+also be selected directly. Route and model names are user-defined YAML keys. The
+catalog accepts only the standardized `routes -> models` schema, and overrides
+always name both parts. See
 [docs/design/model-configuration.md](docs/design/model-configuration.md).
 
 ## Independent stages and parallel execution

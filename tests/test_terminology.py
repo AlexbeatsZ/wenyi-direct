@@ -405,10 +405,29 @@ def test_failed_promotion_resumes_with_policy_invalidation_and_repairs(
     )
 
 
-def test_cli_manages_group_term_and_status(tmp_path: Path) -> None:
+def test_cli_manages_group_term_and_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models = tmp_path / "models.yaml"
+    models.write_text(
+        """routes:
+  test:
+    transport: fake
+    models:
+      fake: {model: fake}
+roles:
+  translate: {route: test, model: fake}
+  factual_audit: {route: test, model: fake}
+  chinese_audit: {route: test, model: fake}
+  repair: {route: test, model: fake}
+  validation: {route: test, model: fake}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WENYI_DIRECT_MODELS", str(models))
     config = tmp_path / "config.yaml"
     config.write_text(
-        """providers:\n  default:\n    provider: fake\npaths:\n  terminology_file: terminology.yaml\n""",
+        "paths:\n  terminology_file: terminology.yaml\n",
         encoding="utf-8",
     )
     runner = CliRunner()

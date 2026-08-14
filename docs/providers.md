@@ -4,17 +4,16 @@ Logical roles (`translate`, `factual_audit`, `chinese_audit`, `repair`, and
 `validation`) select a named route plus a named model available on that route.
 Routes own transport/connection settings; models own the upstream model ID and its
 request options. Both aliases are user-defined in the catalog printed by
-`wenyi-direct models path`. Project YAML may still define legacy providers as a
-backward-compatible, self-contained override.
+`wenyi-direct models path`. Project YAML cannot define model connections.
 
-Use `wenyi-direct models list` to inspect effective profiles,
+Use `wenyi-direct models list` to inspect routes, models, and current selections,
 `wenyi-direct use ROLE ROUTE MODEL` to persist a default mapping, or repeat
 `--model ROLE=ROUTE/MODEL` on `translate`, `review`, and `stage` for one run only. See
 [design/model-configuration.md](design/model-configuration.md) for precedence.
 
-An optional `roles.content_policy_fallback` names one provider used when the
-selected stage provider raises an explicit content-policy refusal, or after a CLI
-provider exhausts `max_retries` for a recognized transient transport/runtime
+An optional `roles.content_policy_fallback` selects one route/model pair used when
+the selected stage client raises an explicit content-policy refusal, or after a CLI
+client exhausts `max_retries` for a recognized transient transport/runtime
 failure such as EOF, connection reset, rate limiting, service unavailability, or
 timeout. Every explicit timeout report, including a headless authentication timeout,
 is retried up to that bound. Repeated invalid JSON also routes to the fallback after
@@ -25,14 +24,14 @@ failures do not switch providers.
 ## Codex CLI
 
 ```yaml
-providers:
-  sol:
-    provider: codex-cli
+routes:
+  codex:
+    transport: codex-cli
     command: codex
     cwd: C:/an/existing/read-only-working-directory
     timeout: 1200
-    tiers:
-      strong:
+    models:
+      gpt-5.6-sol-high:
         model: gpt-5.6-sol
         options: {reasoning_effort: high}
 ```
@@ -44,15 +43,15 @@ the complete business prompt on stdin.
 ## Agy CLI
 
 ```yaml
-providers:
-  gemini:
-    provider: agy
+routes:
+  agy:
+    transport: agy
     command: agy
     cwd: C:/path/to/dedicated/agy-runtime
     isolate_user_config: true
     timeout: 1200
-    tiers:
-      strong:
+    models:
+      gemini-3.1-pro-high:
         model: gemini-3.1-pro-high
 ```
 
@@ -69,14 +68,14 @@ provider and is mechanically exercised by the provider tests.
 ## OpenAI-compatible Chat Completions
 
 ```yaml
-providers:
-  api:
-    provider: openai-compatible
+routes:
+  vendor-api:
+    transport: openai-compatible
     base_url: https://example.invalid/v1
     api_key_env: TRANSLATION_API_KEY
     reasoning_style: none
-    tiers:
-      strong:
+    models:
+      vendor-model:
         model: vendor-model-name
         options:
           request_overrides:
@@ -86,13 +85,13 @@ providers:
 ## Anthropic-compatible Messages
 
 ```yaml
-providers:
-  messages_api:
-    provider: anthropic-compatible
+routes:
+  messages-api:
+    transport: anthropic-compatible
     base_url: https://api.anthropic.com
     api_key_env: ANTHROPIC_API_KEY
-    tiers:
-      strong:
+    models:
+      claude-sonnet:
         model: claude-sonnet-4-5
         options:
           max_tokens: 12000
