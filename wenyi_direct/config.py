@@ -18,14 +18,15 @@ class TierConfig(BaseModel):
 
 
 ReasoningStyle = Literal["none", "deepseek", "openai", "openrouter"]
+TransportKind = Literal[
+    "codex-cli", "agy", "openai-compatible", "anthropic-compatible", "fake"
+]
 
 
 class LLMConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal[
-        "codex-cli", "agy", "openai-compatible", "anthropic-compatible", "fake"
-    ] = "codex-cli"
+    provider: TransportKind = "codex-cli"
     base_url: str | None = None
     api_key_env: str | None = None
     command: str | None = None
@@ -74,24 +75,97 @@ MODEL_ROLE_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
-class ModelRegistry(BaseModel):
-    """User-level named model catalog and default logical-role routing."""
+class NamedModelConfig(BaseModel):
+    """A user-named model available through one route."""
 
     model_config = ConfigDict(extra="forbid")
 
-    providers: dict[str, LLMConfig] = Field(default_factory=dict)
-    roles: ModelRoles = Field(default_factory=ModelRoles)
+    model: str
+    options: dict[str, Any] = Field(default_factory=dict)
+    runtime_name: str | None = None
+
+
+class RouteConfig(BaseModel):
+    """A user-named way to reach one model service or CLI."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    transport: TransportKind
+    base_url: str | None = None
+    api_key_env: str | None = None
+    command: str | None = None
+    cwd: str | None = None
+    isolate_user_config: bool = False
+    reasoning_style: ReasoningStyle = "none"
+    timeout: int = 1200
+    max_retries: int = 3
+    models: dict[str, NamedModelConfig] = Field(default_factory=dict)
+
+
+class RouteSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    route: str
+    model: str
+
+
+class RouteRoles(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    translate: RouteSelection
+    factual_audit: RouteSelection
+    chinese_audit: RouteSelection
+    repair: RouteSelection
+    validation: RouteSelection
+    content_policy_fallback: RouteSelection | None = None
+
+
+class ModelRegistry(BaseModel):
+    """User-level route catalog, per-route models, and default role routing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    routes: dict[str, RouteConfig] = Field(default_factory=dict)
+    roles: RouteRoles
 
     @model_validator(mode="after")
     def validate_roles(self) -> "ModelRegistry":
-        if not self.providers:
-            raise ValueError("models.providers must define at least one model")
-        for role, provider_name in self.roles.model_dump().items():
-            if provider_name is not None and provider_name not in self.providers:
-                raise ValueError(
-                    f"models.roles.{role} references unknown model {provider_name!r}"
+        if not self.routes:
+            raise ValueError("models.routes must define at least one route")
+        runtime_names: dict[str, tuple[str, str]] = {}
+        for route_name, route in self.routes.items():
+            if not route.models:
+                raise ValueError(f"models.routes.{route_name}.models must not be empty")
+            for model_name, model in route.models.items():
+                if model.runtime_name is None:
+                    continue
+                previous = runtime_names.setdefault(
+                    model.runtime_name, (route_name, model_name)
                 )
+                if previous != (route_name, model_name):
+                    raise ValueError(
+                        f"runtime_name {model.runtime_name!r} is used by multiple models"
+                    )
+        for role in MODEL_ROLE_NAMES:
+            selection = getattr(self.roles, role)
+            if selection is not None:
+                self.require_selection(selection, role=role)
         return self
+
+    def require_selection(
+        self, selection: RouteSelection, *, role: str | None = None
+    ) -> NamedModelConfig:
+        prefix = f"models.roles.{role}" if role else "model selection"
+        route = self.routes.get(selection.route)
+        if route is None:
+            raise ValueError(f"{prefix} references unknown route {selection.route!r}")
+        model = route.models.get(selection.model)
+        if model is None:
+            raise ValueError(
+                f"{prefix} references unknown model {selection.model!r} "
+                f"for route {selection.route!r}"
+            )
+        return model
 
 
 class WindowConfig(BaseModel):
@@ -198,18 +272,18 @@ class Config(BaseModel):
             # defaults instead of silently inheriting a user's global routing.
             roles = ModelRoles.model_validate(local_roles or {})
             providers = dict(local_providers)
-            selected_names = {name for name in roles.model_dump().values() if name is not None}
             for override in model_overrides:
-                if "=" in override:
-                    selected_names.add(override.split("=", 1)[1].strip())
-            for name in selected_names:
-                if name not in providers and name in registry.providers:
-                    providers[name] = registry.providers[name]
+                role_names, selection = parse_model_override(registry, override)
+                runtime_name, llm = materialize_selection(registry, selection)
+                providers[runtime_name] = llm
+                role_values = roles.model_dump()
+                for role_name in role_names:
+                    role_values[role_name] = runtime_name
+                roles = ModelRoles.model_validate(role_values)
         else:
-            providers = dict(registry.providers)
-            role_values = registry.roles.model_dump()
-            role_values.update(local_roles or {})
-            roles = ModelRoles.model_validate(role_values)
+            route_roles = merge_project_route_roles(registry, local_roles or {})
+            route_roles = apply_route_overrides(registry, route_roles, model_overrides)
+            providers, roles = materialize_registry(registry, route_roles)
         raw["providers"] = providers
         raw["roles"] = roles
         language = raw.pop("language", {}) or {}
@@ -223,8 +297,7 @@ class Config(BaseModel):
             "terminology_file",
             paths.get("hard_terms_file", raw.get("terminology_file", legacy_terms_file)),
         )
-        config = cls.model_validate(raw)
-        return apply_model_overrides(config, model_overrides)
+        return cls.model_validate(raw)
 
     @staticmethod
     def create_default_file(path: str | Path = "config.yaml") -> bool:
@@ -243,7 +316,7 @@ language:
   source: auto
   target: zh-CN
 
-# Models and default stage routing live in the user-level models.yaml.
+# Routes, their models, and default stage routing live in the user-level models.yaml.
 # Keep only book/project-specific overrides here.
 
 window:
@@ -275,34 +348,38 @@ output:
 
 
 DEFAULT_MODELS_CONFIG = """\
-providers:
-  codex_sol:
-    provider: codex-cli
+routes:
+  codex:
+    transport: codex-cli
     command: codex
     timeout: 1200
-    tiers:
-      strong:
+    models:
+      gpt-5.6-sol-high:
         model: gpt-5.6-sol
         options:
           reasoning_effort: high
-  deepseek_pro:
-    provider: openai-compatible
+        runtime_name: codex_sol
+  deepseek-api:
+    transport: openai-compatible
     base_url: https://api.deepseek.com
     api_key_env: DEEPSEEK_API_KEY
     reasoning_style: deepseek
     timeout: 1200
-    tiers:
-      strong:
+    models:
+      deepseek-v4-pro-max:
         model: deepseek-v4-pro
         options:
           thinking: true
           reasoning_effort: max
+        runtime_name: deepseek_pro
+      deepseek-v4-flash:
+        model: deepseek-v4-flash
 roles:
-  translate: codex_sol
-  factual_audit: codex_sol
-  chinese_audit: codex_sol
-  repair: codex_sol
-  validation: codex_sol
+  translate: {route: codex, model: gpt-5.6-sol-high}
+  factual_audit: {route: codex, model: gpt-5.6-sol-high}
+  chinese_audit: {route: codex, model: gpt-5.6-sol-high}
+  repair: {route: codex, model: gpt-5.6-sol-high}
+  validation: {route: codex, model: gpt-5.6-sol-high}
 """
 
 
@@ -328,22 +405,75 @@ def _default_registry_raw() -> dict[str, Any]:
     return raw
 
 
+def _normalize_registry_raw(raw: dict[str, Any]) -> dict[str, Any]:
+    """Convert the first profile-based catalog schema to route/model selections."""
+    if "routes" in raw:
+        unknown = set(raw) - {"routes", "roles"}
+        if unknown:
+            raise ValueError(f"unknown model registry keys: {sorted(unknown)}")
+        return raw
+    unknown = set(raw) - {"providers", "roles"}
+    if unknown:
+        raise ValueError(f"unknown model registry keys: {sorted(unknown)}")
+    providers = raw.get("providers") or {}
+    routes: dict[str, Any] = {}
+    for profile_name, provider in providers.items():
+        provider = dict(provider or {})
+        tiers = provider.pop("tiers", {}) or {}
+        strong = dict(tiers.get("strong") or {})
+        model_id = strong.get("model")
+        if not model_id:
+            raise ValueError(f"legacy model profile {profile_name!r} has no strong model")
+        transport = provider.pop("provider", "codex-cli")
+        provider["transport"] = transport
+        provider["models"] = {
+            profile_name: {
+                "model": model_id,
+                "options": strong.get("options") or {},
+                "runtime_name": profile_name,
+            }
+        }
+        routes[profile_name] = provider
+    roles: dict[str, Any] = {}
+    for role, profile_name in (raw.get("roles") or {}).items():
+        roles[role] = (
+            None
+            if profile_name is None
+            else {"route": profile_name, "model": profile_name}
+        )
+    return {"routes": routes, "roles": roles}
+
+
 def load_model_registry(path: str | Path | None = None) -> ModelRegistry:
-    """Load built-in models plus optional user overrides from one central file."""
-    raw = _default_registry_raw()
+    """Load named routes, their named models, and default role selections."""
+    raw = _normalize_registry_raw(_default_registry_raw())
     target = resolve_models_path(path)
     if target.exists():
         user_raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
         if not isinstance(user_raw, dict):
             raise ValueError(f"model registry must be a YAML object: {target}")
-        unknown = set(user_raw) - {"providers", "roles"}
-        if unknown:
-            raise ValueError(f"unknown model registry keys: {sorted(unknown)}")
-        providers = dict(raw.get("providers") or {})
-        providers.update(user_raw.get("providers") or {})
+        user_raw = _normalize_registry_raw(user_raw)
+        routes = dict(raw.get("routes") or {})
+        user_runtime_names = {
+            model.get("runtime_name")
+            for route in (user_raw.get("routes") or {}).values()
+            for model in (route.get("models") or {}).values()
+            if model.get("runtime_name") is not None
+        }
+        for route_name, route in list(routes.items()):
+            models = {
+                name: model
+                for name, model in (route.get("models") or {}).items()
+                if model.get("runtime_name") not in user_runtime_names
+            }
+            if models:
+                routes[route_name] = {**route, "models": models}
+            else:
+                routes.pop(route_name)
+        routes.update(user_raw.get("routes") or {})
         roles = dict(raw.get("roles") or {})
         roles.update(user_raw.get("roles") or {})
-        raw = {"providers": providers, "roles": roles}
+        raw = {"routes": routes, "roles": roles}
     return ModelRegistry.model_validate(raw)
 
 
@@ -382,25 +512,111 @@ def expand_model_role(name: str) -> tuple[str, ...]:
         raise ValueError(f"unknown model role {name!r}; choose one of: {choices}") from error
 
 
-def apply_model_overrides(
-    config: Config,
+def resolve_route_selection(
+    registry: ModelRegistry, route_name: str, model_name: str
+) -> RouteSelection:
+    selection = RouteSelection(route=route_name, model=model_name)
+    registry.require_selection(selection)
+    return selection
+
+
+def resolve_model_reference(registry: ModelRegistry, name: str) -> RouteSelection:
+    """Resolve a unique model alias/runtime name for legacy short override syntax."""
+    matches: list[RouteSelection] = []
+    for route_name, route in registry.routes.items():
+        for model_name, model in route.models.items():
+            if name in {model_name, model.runtime_name}:
+                matches.append(RouteSelection(route=route_name, model=model_name))
+    if not matches:
+        raise ValueError(f"unknown model {name!r}")
+    if len(matches) > 1:
+        raise ValueError(
+            f"model name {name!r} exists on multiple routes; use ROUTE/MODEL"
+        )
+    return matches[0]
+
+
+def parse_model_override(
+    registry: ModelRegistry, override: str
+) -> tuple[tuple[str, ...], RouteSelection]:
+    if "=" not in override:
+        raise ValueError(
+            f"model override {override!r} must use ROLE=ROUTE/MODEL, "
+            "for example audit=deepseek-api/deepseek-v4-flash"
+        )
+    role_name, reference = (part.strip() for part in override.split("=", 1))
+    if not reference:
+        raise ValueError(f"model override {override!r} has an empty route/model")
+    if "/" in reference:
+        route_name, model_name = (part.strip() for part in reference.split("/", 1))
+        selection = resolve_route_selection(registry, route_name, model_name)
+    else:
+        selection = resolve_model_reference(registry, reference)
+    return expand_model_role(role_name), selection
+
+
+def apply_route_overrides(
+    registry: ModelRegistry,
+    roles: RouteRoles,
     overrides: list[str] | tuple[str, ...],
-) -> Config:
-    if not overrides:
-        return config
-    role_values = config.roles.model_dump()
+) -> RouteRoles:
+    role_values = roles.model_dump()
     for override in overrides:
-        if "=" not in override:
-            raise ValueError(
-                f"model override {override!r} must use ROLE=MODEL, for example audit=deepseek_pro"
-            )
-        role_name, model_name = (part.strip() for part in override.split("=", 1))
-        if not model_name:
-            raise ValueError(f"model override {override!r} has an empty model name")
-        if model_name not in config.providers:
-            raise ValueError(f"model override references unknown model {model_name!r}")
-        for role in expand_model_role(role_name):
-            role_values[role] = model_name
-    values = config.model_dump()
-    values["roles"] = role_values
-    return Config.model_validate(values)
+        role_names, selection = parse_model_override(registry, override)
+        for role_name in role_names:
+            role_values[role_name] = selection.model_dump()
+    return RouteRoles.model_validate(role_values)
+
+
+def merge_project_route_roles(
+    registry: ModelRegistry, overrides: dict[str, Any]
+) -> RouteRoles:
+    values = registry.roles.model_dump()
+    for role, selection in overrides.items():
+        if selection is None:
+            values[role] = None
+        elif isinstance(selection, str):
+            values[role] = resolve_model_reference(registry, selection).model_dump()
+        else:
+            values[role] = selection
+    return RouteRoles.model_validate(values)
+
+
+def materialize_selection(
+    registry: ModelRegistry, selection: RouteSelection
+) -> tuple[str, LLMConfig]:
+    model = registry.require_selection(selection)
+    route = registry.routes[selection.route]
+    runtime_name = model.runtime_name or f"{selection.route}::{selection.model}"
+    route_values = route.model_dump(exclude={"models"})
+    route_values["provider"] = route_values.pop("transport")
+    route_values["tiers"] = {
+        "strong": {"model": model.model, "options": model.options}
+    }
+    return runtime_name, LLMConfig.model_validate(route_values)
+
+
+def materialize_registry(
+    registry: ModelRegistry, route_roles: RouteRoles
+) -> tuple[dict[str, LLMConfig], ModelRoles]:
+    providers: dict[str, LLMConfig] = {}
+
+    def add(selection: RouteSelection) -> str:
+        runtime_name, llm = materialize_selection(registry, selection)
+        previous = providers.setdefault(runtime_name, llm)
+        if previous != llm:
+            raise ValueError(f"runtime provider name collision: {runtime_name!r}")
+        return runtime_name
+
+    # Preserve explicitly named legacy runtime profiles even while unused. This
+    # keeps active resumable policy fingerprints stable across schema migration.
+    for route_name, route in registry.routes.items():
+        for model_name, model in route.models.items():
+            if model.runtime_name is not None:
+                add(RouteSelection(route=route_name, model=model_name))
+
+    role_values: dict[str, str | None] = {}
+    for role in MODEL_ROLE_NAMES:
+        selection = getattr(route_roles, role)
+        role_values[role] = None if selection is None else add(selection)
+    return providers, ModelRoles.model_validate(role_values)

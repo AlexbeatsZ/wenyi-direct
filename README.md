@@ -38,25 +38,27 @@ current book's state rather than the shared terminology seed file.
 - `openai-compatible`: `/chat/completions` services
 - `anthropic-compatible`: Anthropic Messages-compatible `/v1/messages` services
 
-Each stage may use a different transport, or all stages may share one model. Reusable
-connections and model parameters live once in the user-level `models.yaml`; project
-YAML only carries book-specific settings. API keys are named by `api_key_env` and
-supplied through environment variables.
+Each stage selects two independent names: a route (`agy`, `codex`, `web2api`,
+`deepseek-api`, or any custom alias) and one model exposed under that route. Route
+connection settings and model aliases live once in the user-level `models.yaml`;
+project YAML only carries book-specific settings. API keys are named by
+`api_key_env` and supplied through environment variables.
 
 ```powershell
 # Inspect and persistently switch the unified defaults.
 uv run wenyi-direct models path
 uv run wenyi-direct models list
-uv run wenyi-direct models use audit deepseek_pro
-uv run wenyi-direct models use repair codex_sol
+uv run wenyi-direct use audit deepseek-api deepseek-v4-pro-max
+uv run wenyi-direct use repair codex gpt-5.6-sol-high
 
 # Override selected roles for one invocation only.
-uv run wenyi-direct review path\to\book.epub --model audit=gemini_pro --model repair=codex_sol
+uv run wenyi-direct review path\to\book.epub --model audit=web2api/gemini-3.1-pro --model repair=codex/gpt-5.6-sol-high
 ```
 
 `audit` is a shortcut for both factual and Chinese-reader audit roles. `translate`,
 `factual-audit`, `chinese-audit`, `repair`, `validation`, `fallback`, and `all` may
-also be selected directly. See
+also be selected directly. `models use ROLE ROUTE MODEL` remains an alias of the
+shorter top-level command. Route and model names are user-defined YAML keys. See
 [docs/design/model-configuration.md](docs/design/model-configuration.md).
 
 ## Independent stages and parallel execution

@@ -27,9 +27,9 @@ or atomic Formal promotion.
 - Repair and arbitration prompts require every writable stable ID exactly once with
   a non-empty target; the stricter contract migrates old pending Shadows in place.
 - Detailed scheduling and concurrency rules: `docs/design/stage-execution.md`.
-- Reusable providers/models and default stage routing live in one user-level catalog;
-  project YAML is sparse and one-run or persistent role switching is available from
-  the CLI. Detailed rules: `docs/design/model-configuration.md`.
+- Reusable routes and per-route models live separately in one user-level catalog;
+  project YAML is sparse and `use ROLE ROUTE MODEL` or one-run overrides select both
+  aliases. Detailed rules: `docs/design/model-configuration.md`.
 
 ## Active Work
 
@@ -45,10 +45,10 @@ or atomic Formal promotion.
 - The live Satisfaction review keeps only book-specific settings in
   `C:/Users/Meta/Project/Workspaces/Satisfaction/config.wenyi-direct.yaml` and
   inherits `%APPDATA%/wenyi-direct/models.yaml`: `translate`/`factual_audit`/
-  `chinese_audit`/`validation` use `deepseek_pro` (`deepseek-v4-pro`, max
-  thinking); `repair` uses `codex_sol` (gpt-5.6-sol). The migrated effective
-  configuration is identical after canonical JSON serialization, so existing
-  review policy fingerprints remain valid.
+  `chinese_audit`/`validation` select `deepseek-api/deepseek-v4-pro-max`;
+  `repair` selects `codex/gpt-5.6-sol-high`. The route/model schema migration keeps
+  the materialized runtime configuration identical after canonical JSON
+  serialization, so existing review policy fingerprints remain valid.
 - Codex's exact `You've hit your usage limit` response intentionally interrupts
   immediately without retry or fallback.
 - The abandoned `agent/stage-commands-and-staggered-pipeline` branch is not the
@@ -150,8 +150,9 @@ promotion to the final text.
   Generic markers such as `quota exceeded` do not cover Codex's current
   `You've hit your usage limit` response; this exact response is deliberately tested
   as an immediate interruption without retry or fallback.
-- Model connections must not be copied into each book config. Keep reusable profiles
-  and default role routing in the user `models.yaml`; use project `roles` only for a
-  deliberate exception and one-run `--model` overrides for experiments. When
-  migrating active resumable work, prove the fully resolved `Config.model_dump()`
-  is unchanged so paid checkpoints are not invalidated.
+- Model connections must not be copied into each book config or conflated with model
+  names. Keep user-named routes and their user-named models as separate levels in
+  `models.yaml`; select both with `use ROLE ROUTE MODEL`. Use project `roles` only
+  for a deliberate exception and one-run `--model ROLE=ROUTE/MODEL` for experiments.
+  When migrating active resumable work, prove the fully resolved
+  `Config.model_dump()` is unchanged so paid checkpoints are not invalidated.

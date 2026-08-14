@@ -1,41 +1,45 @@
-providers:
-  codex_sol:
-    provider: codex-cli
-    command: codex
-    timeout: 1200
-    tiers:
-      strong:
-        model: gpt-5.6-sol
-        options: {reasoning_effort: high}
-  deepseek_pro:
-    provider: openai-compatible
-    base_url: https://api.deepseek.com
-    api_key_env: DEEPSEEK_API_KEY
-    reasoning_style: deepseek
-    timeout: 1200
-    tiers:
-      strong:
-        model: deepseek-v4-pro
-        options: {thinking: true, reasoning_effort: max}
-  gemini_pro:
-    provider: openai-compatible
-    base_url: http://127.0.0.1:3000/v1
-    timeout: 1200
-    tiers:
-      strong: {model: gemini-3.1-pro}
-  gemini_pro_agy:
-    provider: agy
+routes:
+  agy:
+    transport: agy
     command: agy
     cwd: C:/path/to/dedicated/agy-runtime
     isolate_user_config: true
     timeout: 1200
-    tiers:
-      strong: {model: gemini-3.1-pro-high}
+    models:
+      gemini-3.1-pro-high:
+        model: gemini-3.1-pro-high
+  codex:
+    transport: codex-cli
+    command: codex
+    timeout: 1200
+    models:
+      gpt-5.6-sol-high:
+        model: gpt-5.6-sol
+        options: {reasoning_effort: high}
+  deepseek-api:
+    transport: openai-compatible
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    reasoning_style: deepseek
+    timeout: 1200
+    models:
+      deepseek-v4-pro-max:
+        model: deepseek-v4-pro
+        options: {thinking: true, reasoning_effort: max}
+      deepseek-v4-flash:
+        model: deepseek-v4-flash
+  web2api:
+    transport: openai-compatible
+    base_url: http://127.0.0.1:3000/v1
+    timeout: 1200
+    models:
+      gemini-3.1-pro:
+        model: gemini-3.1-pro
 
 roles:
-  translate: deepseek_pro
-  factual_audit: deepseek_pro
-  chinese_audit: deepseek_pro
-  repair: codex_sol
-  validation: deepseek_pro
-  content_policy_fallback: deepseek_pro
+  translate: {route: deepseek-api, model: deepseek-v4-pro-max}
+  factual_audit: {route: deepseek-api, model: deepseek-v4-pro-max}
+  chinese_audit: {route: deepseek-api, model: deepseek-v4-pro-max}
+  repair: {route: codex, model: gpt-5.6-sol-high}
+  validation: {route: deepseek-api, model: deepseek-v4-pro-max}
+  content_policy_fallback: {route: deepseek-api, model: deepseek-v4-pro-max}

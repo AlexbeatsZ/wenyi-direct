@@ -2,7 +2,7 @@ language:
   source: ja
   target: zh-CN
 
-# Provider/model definitions and default role routing are centralized in the user
+# Route/model definitions and default role routing are centralized in the user
 # models.yaml shown in models.example.yaml. Add `roles:` here only for a deliberate
 # project-specific exception.
 

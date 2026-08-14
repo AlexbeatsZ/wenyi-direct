@@ -15,6 +15,7 @@ from .config import (
     expand_model_role,
     load_model_registry,
     resolve_models_path,
+    resolve_route_selection,
     save_model_registry,
 )
 from .llm.factory import build_clients
@@ -98,47 +99,86 @@ def init_models(
 def list_models(
     models: Path | None = typer.Option(None, "--models", help="Central models.yaml path."),
 ) -> None:
-    """List named models and the stages currently routed to each one."""
+    """List custom routes, their custom model names, and current role selections."""
     registry = load_model_registry(models)
-    role_values = registry.roles.model_dump()
-    table = Table(title=f"Models: {resolve_models_path(models)}")
-    table.add_column("Name")
-    table.add_column("Transport")
-    table.add_column("Model")
-    table.add_column("Used by")
-    for name, provider in registry.providers.items():
-        strong = provider.tiers.get("strong")
-        used_by = [role.replace("_", "-") for role, selected in role_values.items() if selected == name]
-        table.add_row(
-            name,
-            provider.provider,
-            strong.model if strong and strong.model else "",
-            ", ".join(used_by),
+    console.print(resolve_models_path(models))
+    routes_table = Table(title="Routes")
+    routes_table.add_column("Name")
+    routes_table.add_column("Transport")
+    for route_name, route in registry.routes.items():
+        routes_table.add_row(route_name, route.transport)
+    console.print(routes_table)
+
+    models_table = Table(title="Models")
+    models_table.add_column("Route")
+    models_table.add_column("Custom name")
+    models_table.add_column("Upstream model")
+    for route_name, route in registry.routes.items():
+        for model_name, model in route.models.items():
+            models_table.add_row(
+                route_name,
+                model_name,
+                model.model,
+            )
+    console.print(models_table)
+
+    roles_table = Table(title="Current routing")
+    roles_table.add_column("Role")
+    roles_table.add_column("Route")
+    roles_table.add_column("Model")
+    for role_name in type(registry.roles).model_fields:
+        selected = getattr(registry.roles, role_name)
+        roles_table.add_row(
+            role_name.replace("_", "-"),
+            selected.route if selected else "",
+            selected.model if selected else "",
         )
-    console.print(table)
+    console.print(roles_table)
+
+
+def _persist_route_selection(
+    role: str,
+    route: str,
+    model: str,
+    models: Path | None,
+) -> None:
+    """Persist one route/model pair for a logical role or role group."""
+    registry = load_model_registry(models)
+    try:
+        selected_roles = expand_model_role(role)
+        selection = resolve_route_selection(registry, route, model)
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    role_values = registry.roles.model_dump()
+    for selected_role in selected_roles:
+        role_values[selected_role] = selection.model_dump()
+    updated = registry.model_copy(update={"roles": type(registry.roles).model_validate(role_values)})
+    target = save_model_registry(updated, models)
+    selected_text = ", ".join(item.replace("_", "-") for item in selected_roles)
+    console.print(f"Updated {selected_text} -> {route} / {model}")
+    console.print(target)
+
+
+@app.command("use")
+def use_route(
+    role: str = typer.Argument(..., help="Stage role or group: audit, repair, validation, all."),
+    route: str = typer.Argument(..., help="Custom route name, such as deepseek-api."),
+    model: str = typer.Argument(..., help="Custom model name available on that route."),
+    models: Path | None = typer.Option(None, "--models", help="Central models.yaml path."),
+) -> None:
+    """Persist: use ROLE ROUTE MODEL."""
+    _persist_route_selection(role, route, model, models)
 
 
 @models_app.command("use")
 def use_model(
     role: str = typer.Argument(..., help="Stage role or group: audit, repair, validation, all."),
-    name: str = typer.Argument(..., help="Named model from `models list`."),
+    route: str = typer.Argument(..., help="Custom route name, such as deepseek-api."),
+    model: str = typer.Argument(..., help="Custom model name available on that route."),
     models: Path | None = typer.Option(None, "--models", help="Central models.yaml path."),
 ) -> None:
-    """Persist the default model for one logical role or role group."""
-    registry = load_model_registry(models)
-    if name not in registry.providers:
-        raise typer.BadParameter(f"unknown model {name!r}; run `wenyi-direct models list`")
-    try:
-        selected_roles = expand_model_role(role)
-    except ValueError as error:
-        raise typer.BadParameter(str(error), param_hint="role") from error
-    role_values = registry.roles.model_dump()
-    for selected_role in selected_roles:
-        role_values[selected_role] = name
-    updated = registry.model_copy(update={"roles": type(registry.roles).model_validate(role_values)})
-    target = save_model_registry(updated, models)
-    console.print(f"Updated {', '.join(item.replace('_', '-') for item in selected_roles)} -> {name}")
-    console.print(target)
+    """Alias of the top-level `use ROLE ROUTE MODEL` command."""
+    _persist_route_selection(role, route, model, models)
 
 
 @app.command()
@@ -172,7 +212,7 @@ def translate(
         None,
         "--model",
         "-m",
-        help="One-run ROLE=MODEL override; repeat for multiple roles.",
+        help="One-run ROLE=ROUTE/MODEL override; repeat for multiple roles.",
     ),
 ) -> None:
     """Resume direct translation and all configured quality gates."""
@@ -213,7 +253,7 @@ def review(
         None,
         "--model",
         "-m",
-        help="One-run ROLE=MODEL override; for example audit=deepseek_pro.",
+        help="One-run ROLE=ROUTE/MODEL; e.g. audit=deepseek-api/deepseek-v4-flash.",
     ),
 ) -> None:
     """Re-audit existing Formal text through factual and Chinese-reader gates."""
@@ -250,7 +290,7 @@ def stage(
         None,
         "--model",
         "-m",
-        help="One-run ROLE=MODEL override; repeat for stages that use repair and validation.",
+        help="One-run ROLE=ROUTE/MODEL; repeat for repair and validation.",
     ),
 ) -> None:
     """Run one persisted pipeline stage without continuing into later stages."""

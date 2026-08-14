@@ -100,15 +100,21 @@ def test_config_rejects_prompt_language_mismatch_and_invalid_window_budget() -> 
 def test_sparse_project_config_uses_central_models_and_cli_overrides(tmp_path: Path) -> None:
     models = tmp_path / "models.yaml"
     models.write_text(
-        """providers:
-  first: {provider: fake}
-  second: {provider: fake}
+        """routes:
+  first-route:
+    transport: fake
+    models:
+      first-model: {model: first-upstream, runtime_name: first}
+  second-route:
+    transport: fake
+    models:
+      second-model: {model: second-upstream, runtime_name: second}
 roles:
-  translate: first
-  factual_audit: first
-  chinese_audit: first
-  repair: first
-  validation: first
+  translate: {route: first-route, model: first-model}
+  factual_audit: {route: first-route, model: first-model}
+  chinese_audit: {route: first-route, model: first-model}
+  repair: {route: first-route, model: first-model}
+  validation: {route: first-route, model: first-model}
 """,
         encoding="utf-8",
     )
@@ -118,7 +124,10 @@ roles:
     config = Config.load(
         project,
         models_path=models,
-        model_overrides=["audit=second", "repair=second"],
+        model_overrides=[
+            "audit=second-route/second-model",
+            "repair=second-route/second-model",
+        ],
     )
 
     assert config.roles.translate == "first"
@@ -132,7 +141,10 @@ def test_legacy_self_contained_config_does_not_inherit_central_roles(tmp_path: P
     models = tmp_path / "models.yaml"
     models.write_text(
         """providers:
-  central: {provider: fake}
+  central:
+    provider: fake
+    tiers:
+      strong: {model: central-upstream}
 roles:
   translate: central
   factual_audit: central
@@ -153,7 +165,7 @@ roles:
     overridden = Config.load(
         project,
         models_path=models,
-        model_overrides=["repair=central"],
+        model_overrides=["repair=central/central"],
     )
     assert overridden.roles.translate == "default"
     assert overridden.roles.repair == "central"
@@ -168,19 +180,52 @@ def test_models_cli_persists_role_groups_in_one_catalog(tmp_path: Path) -> None:
 
     switched = runner.invoke(
         app,
-        ["models", "use", "audit", "deepseek_pro", "--models", str(models)],
+        [
+            "use",
+            "translate",
+            "deepseek-api",
+            "deepseek-v4-flash",
+            "--models",
+            str(models),
+        ],
     )
     assert switched.exit_code == 0
-    assert "factual-audit, chinese-audit -> deepseek_pro" in switched.output
+    assert "translate -> deepseek-api / deepseek-v4-flash" in switched.output
+
+    alias_switched = runner.invoke(
+        app,
+        [
+            "models",
+            "use",
+            "audit",
+            "deepseek-api",
+            "deepseek-v4-flash",
+            "--models",
+            str(models),
+        ],
+    )
+    assert alias_switched.exit_code == 0
 
     project = tmp_path / "project.yaml"
     project.write_text("language: {source: ja, target: zh-CN}\n", encoding="utf-8")
     config = Config.load(project, models_path=models)
-    assert config.roles.factual_audit == "deepseek_pro"
-    assert config.roles.chinese_audit == "deepseek_pro"
+    assert config.roles.translate == "deepseek-api::deepseek-v4-flash"
+    assert config.roles.factual_audit == "deepseek-api::deepseek-v4-flash"
+    assert config.roles.chinese_audit == "deepseek-api::deepseek-v4-flash"
     assert config.roles.repair == "codex_sol"
+    flash = config.providers["deepseek-api::deepseek-v4-flash"]
+    assert flash.provider == "openai-compatible"
+    assert flash.tiers["strong"].model == "deepseek-v4-flash"
+
+    saved = models.read_text(encoding="utf-8")
+    assert "routes:" in saved
+    assert "providers:" not in saved
+    assert "route: deepseek-api" in saved
+    assert "model: deepseek-v4-flash" in saved
 
     listed = runner.invoke(app, ["models", "list", "--models", str(models)])
     assert listed.exit_code == 0
-    assert "deepseek_pro" in listed.output
-    assert "codex_sol" in listed.output
+    assert "deepseek-api" in listed.output
+    assert "deepseek-v4-flash" in listed.output
+    assert "codex" in listed.output
+    assert "gpt-5.6-sol-high" in listed.output
