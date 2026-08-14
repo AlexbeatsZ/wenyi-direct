@@ -1,4 +1,4 @@
-# Wenyi Direct domain context
+# Kamyi domain context
 
 ## Core language
 

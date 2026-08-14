@@ -25,7 +25,7 @@ dispatcher. The CLI therefore needs only `stage <name>` for granular work and
 rollback baseline and changes only at the ordinary atomic `promote` gate.
 
 ```powershell
-uv run wenyi-direct review book.epub --config config.yaml --parallel
+uv run kamyi review book.epub --config config.yaml --parallel
 ```
 
 Audit windows, source validations, repair regions, and the Formal baseline are
@@ -35,7 +35,7 @@ just before execution rather than all at once, preserving prior Formal context a
 keeping later chapters formally complete until their turn.
 
 Legacy states created before `source_sha256` was persisted may enter review only
-after Wenyi Direct reparses the source and matches every chapter and segment's index,
+after Kamyi reparses the source and matches every chapter and segment's index,
 source text, kind, and anchor. A complete match backfills the digest once; any
 structural difference remains blocked as an explicit migration instead of silently
 attaching Formal text to a different source.
@@ -59,7 +59,7 @@ the final small commit window is resumable without another model call as well.
 The Sol repair role is not subordinate to the Gemini finding. On its first call it
 may return `reject_finding` with a source-based reason; the region then keeps its
 pre-repair target and continues without a Gemini fidelity call. If Sol proposes a
-repair and bounded Gemini validation still disagrees, Wenyi Direct persists an
+repair and bounded Gemini validation still disagrees, Kamyi persists an
 `arbitration_required` checkpoint and gives Sol one final source-aware arbitration
 call containing the original finding, rejected candidate, and latest validation
 feedback. Sol may `accept` a final translation or `skip` the region. Its accepted

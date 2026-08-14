@@ -9,7 +9,7 @@ import zipfile
 from bs4 import BeautifulSoup
 
 ABOUT_TITLE = "关于此翻译"
-ABOUT_FILENAME = "wenyi-direct-about.xhtml"
+ABOUT_FILENAME = "kamyi-about.xhtml"
 
 def about_xhtml(lang: str) -> bytes:
     """返回可独立加入 EPUB spine 的 XHTML 页面。"""
@@ -30,7 +30,7 @@ def about_xhtml(lang: str) -> bytes:
 <body>
   <section class="tn-about">
     <h1>{ABOUT_TITLE}</h1>
-    <p class="tn-about-lead">本书由 <strong>Wenyi Direct</strong> 生成。</p>
+    <p class="tn-about-lead">本书由 <strong>Kamyi</strong> 生成。</p>
     <p>该工具先直接翻译完整章节，再依次进行事实核对、纯中文阅读检查和必要的源文验证。译文仅在全部质量门通过后写入正式文本。</p>
     <p>自动翻译仍可能出错；如用于正式传播，请继续进行人工校对。</p>
     <p class="tn-about-closing">感谢阅读。</p>
@@ -80,10 +80,10 @@ def append_about_to_opf(data: bytes, href: str) -> tuple[bytes, bool]:
             value = existing_item.get("id")
             if isinstance(value, str):
                 existing_ids.add(value)
-        item_id = "wenyi-direct-about"
+        item_id = "kamyi-about"
         suffix = 1
         while item_id in existing_ids:
-            item_id = f"wenyi-direct-about-{suffix}"
+            item_id = f"kamyi-about-{suffix}"
             suffix += 1
 
         item = soup.new_tag("item")

@@ -1,4 +1,4 @@
-# Wenyi Direct agent contract
+# Kamyi agent contract
 
 ## Goal
 
@@ -53,7 +53,7 @@ or atomic Formal promotion.
 
 ## Product identity
 
-Wenyi Direct is a command-line long-form literary translator. It is intentionally
+Kamyi is a command-line long-form literary translator inspired by Wenyi. It is intentionally
 chapter-first: a strong model performs the first formal translation from source
 text, then source-aware factual review and source-free Chinese reading review gate
 promotion to the final text.

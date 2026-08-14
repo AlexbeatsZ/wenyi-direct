@@ -4,7 +4,7 @@
 
 The first formal translation establishes subjects, reference, dialogue ownership,
 word sense, and Chinese sentence structure. A cheap draft can anchor later models to
-a fluent but incorrect frame, so Wenyi Direct does not create one. The first model
+a fluent but incorrect frame, so Kamyi does not create one. The first model
 sees unpolluted source context and produces the candidate directly.
 
 For Japanese source, the translation prompt states general structural risks rather

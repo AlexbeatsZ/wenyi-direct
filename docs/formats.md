@@ -23,7 +23,7 @@ valid file is:
 
 A segment may also be a plain string. Optional structured fields are `kind`,
 `anchor`, `resource_href`, `cont`, and `meta`. Array order defines chapter and
-segment indexes; Wenyi Direct derives stable IDs from chapter index, segment index,
+segment indexes; Kamyi derives stable IDs from chapter index, segment index,
 and a source digest. Do not reorder or edit the source while resuming an existing
 state. JSON export preserves `source`, accepted `target`, structural fields, and
 metadata.

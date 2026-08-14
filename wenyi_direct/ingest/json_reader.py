@@ -1,4 +1,4 @@
-"""Reader for Wenyi Direct's stable JSON interchange format."""
+"""Reader for Kamyi's stable JSON interchange format."""
 
 from __future__ import annotations
 
