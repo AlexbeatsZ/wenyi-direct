@@ -30,6 +30,16 @@ providers:
   #   isolate_user_config: true
   #   tiers:
   #     strong: {model: gemini-3.1-pro-high}
+# deepseek:
+#   provider: openai-compatible
+#   base_url: https://api.deepseek.com/v1
+#   api_key_env: DEEPSEEK_API_KEY
+#   reasoning_style: deepseek
+#   tiers:
+#     strong:
+#       model: deepseek-v4-pro
+#       options: {thinking: true, reasoning_effort: max}
+
 
 roles:
   translate: sol
