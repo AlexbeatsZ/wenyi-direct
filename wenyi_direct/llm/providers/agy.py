@@ -89,7 +89,7 @@ def _temporary_request() -> Iterator[tuple[str, Path]]:
     the OS to release later instead of turning a valid model response into failure.
     """
     with tempfile.TemporaryDirectory(
-        prefix="wenyi-direct-agy-", ignore_cleanup_errors=True
+        prefix="kamyi-agy-", ignore_cleanup_errors=True
     ) as request_dir:
         request_path = Path(request_dir) / _REQUEST_FILE_NAME
         try:

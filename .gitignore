@@ -6,5 +6,12 @@ __pycache__/
 state/
 outputs/
 config.yaml
+models.yaml
+terminology.yaml
+.env
+.env.*
+*.epub
+*.fb2
+*.pdf
 *.tmp
 *.log

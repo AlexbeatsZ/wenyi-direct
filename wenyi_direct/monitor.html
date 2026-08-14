@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Wenyi 实时观察器</title>
+  <title>Kamyi 实时观察器</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -138,7 +138,7 @@
 <body>
   <main class="shell">
     <header class="app-header">
-      <div><div class="eyebrow">Formal + Shadow · Read only</div><h1 id="book">Wenyi Direct 实时观察器</h1></div>
+      <div><div class="eyebrow">Formal + Shadow · Read only</div><h1 id="book">Kamyi 实时观察器</h1></div>
       <div class="live"><span class="dot"></span><span id="freshness">正在连接…</span></div>
     </header>
 
@@ -344,7 +344,7 @@
       });
       if (!content.childNodes.length) content.append(text('div','本章尚未产生可阅读译文。','reader-empty'));
       $('readerSelect').value=String(chapter.index); readerUpdateNav();
-      document.title=`${chapter.title} · Wenyi 阅读情节`;
+      document.title=`${chapter.title} · Kamyi 阅读情节`;
     }
     async function readerLoadChapter(index,{preserveScroll=false}={}) {
       if (state.reader.loading) return; state.reader.loading=true;
@@ -381,11 +381,11 @@
       $('monitorView').hidden=surface!=='monitor'; $('readerView').hidden=surface!=='reader';
       document.querySelectorAll('.surface-button').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.surface===surface)));
       if (surface==='reader'&&!state.reader.book) readerLoadBook();
-      if (surface==='monitor') document.title='Wenyi 实时观察器';
+      if (surface==='monitor') document.title='Kamyi 实时观察器';
       requestAnimationFrame(()=>window.scrollTo({top:state.surfaceScroll[surface]||0,behavior:'instant'}));
     }
     function render(data) {
-      state.data=data; $('book').textContent=data.book || 'Wenyi 实时观察器';
+      state.data=data; $('book').textContent=data.book || 'Kamyi 实时观察器';
       const c=data.current; $('stage').textContent=c.stage_label;
       $('currentHeading').textContent=c.chapter == null ? c.stage_label : `第 ${c.chapter + 1} 章 · ${c.title || '未命名章节'}`;
       $('currentDesc').textContent=c.explanation; $('precision').textContent=c.precision;

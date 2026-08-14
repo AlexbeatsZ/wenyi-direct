@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only live dashboard and reader for a Wenyi Direct run directory."""
+"""Read-only live dashboard and reader for a Kamyi run directory."""
 
 from __future__ import annotations
 
@@ -698,7 +698,7 @@ def serve(
     Handler.observer = Observer(run_dir, config_path)
     server = ThreadingHTTPServer((host, port), Handler)
     url = f"http://{host}:{server.server_port}/"
-    print(f"Wenyi Direct Monitor: {url}", flush=True)
+    print(f"Kamyi Monitor: {url}", flush=True)
     print(f"Read-only run directory: {run_dir}", flush=True)
     if open_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
@@ -716,7 +716,7 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(
-        description="为指定 Wenyi 书籍启动只读的审核监控与情节阅读页面"
+        description="为指定 Kamyi 书籍启动只读的审核监控与情节阅读页面"
     )
     parser.add_argument(
         "run_dir",

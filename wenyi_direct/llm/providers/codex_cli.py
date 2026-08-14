@@ -1,4 +1,4 @@
-"""Ephemeral, read-only ``codex exec`` adapter for any Wenyi Direct role."""
+"""Ephemeral, read-only ``codex exec`` adapter for any Kamyi role."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-# Wenyi Direct agent contract
+# Kamyi agent contract
 
 ## Goal
 
@@ -30,6 +30,7 @@ or atomic Formal promotion.
 - Reusable routes and per-route models live separately in one user-level catalog;
   project YAML is sparse and `use ROLE ROUTE MODEL` or one-run overrides select both
   aliases. Detailed rules: `docs/design/model-configuration.md`.
+- Public usage documentation is bilingual: `README.md` and `README.zh-CN.md`.
 
 ## Active Work
 
@@ -53,7 +54,7 @@ or atomic Formal promotion.
 
 ## Product identity
 
-Wenyi Direct is a command-line long-form literary translator. It is intentionally
+Kamyi is a command-line long-form literary translator inspired by Wenyi. It is intentionally
 chapter-first: a strong model performs the first formal translation from source
 text, then source-aware factual review and source-free Chinese reading review gate
 promotion to the final text.

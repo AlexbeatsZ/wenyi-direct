@@ -1,4 +1,4 @@
-"""Typed YAML configuration for Wenyi Direct."""
+"""Typed YAML configuration for Kamyi."""
 
 from __future__ import annotations
 
@@ -228,7 +228,7 @@ class Config(BaseModel):
         target = self.target_lang.casefold().replace("_", "-")
         if target not in {"zh", "zh-cn", "zh-hans"}:
             raise ValueError(
-                "Wenyi Direct currently emits Simplified Chinese only; "
+                "Kamyi currently emits Simplified Chinese only; "
                 "target_lang must be zh-CN"
             )
         self.target_lang = "zh-CN"
@@ -360,14 +360,18 @@ roles:
 
 def default_models_path() -> Path:
     """Return the platform user-level model registry path."""
-    configured = os.environ.get("WENYI_DIRECT_MODELS")
+    configured = os.environ.get("KAMYI_MODELS") or os.environ.get("WENYI_DIRECT_MODELS")
     if configured:
         return Path(configured).expanduser()
     if os.name == "nt" and os.environ.get("APPDATA"):
         root = Path(os.environ["APPDATA"])
     else:
         root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return root / "wenyi-direct" / "models.yaml"
+    current = root / "kamyi" / "models.yaml"
+    legacy = root / "wenyi-direct" / "models.yaml"
+    if legacy.exists() and not current.exists():
+        return legacy
+    return current
 
 
 def resolve_models_path(path: str | Path | None = None) -> Path:

@@ -1,6 +1,6 @@
 # Unified model configuration
 
-Wenyi Direct separates reusable model connections from book-specific settings and
+Kamyi separates reusable model connections from book-specific settings and
 separates connection routes from models. A route is a user-defined way to call a
 service or CLI, such as `agy`, `codex`, `web2api`, or `deepseek-api`. Each route has
 its own user-defined model names, upstream model IDs, and request options. Default
@@ -28,9 +28,10 @@ to the selected route.
 
 ## Central path and precedence
 
-The default catalog is `%APPDATA%/wenyi-direct/models.yaml` on Windows and
-`$XDG_CONFIG_HOME/wenyi-direct/models.yaml` (or `~/.config/wenyi-direct/models.yaml`)
-elsewhere. `WENYI_DIRECT_MODELS` or the model-management command's `--models` option
+The default catalog is `%APPDATA%/kamyi/models.yaml` on Windows and
+`$XDG_CONFIG_HOME/kamyi/models.yaml` (or `~/.config/kamyi/models.yaml`)
+elsewhere. `KAMYI_MODELS` (with legacy `WENYI_DIRECT_MODELS` support) or the
+model-management command's `--models` option
 may select another catalog for portable/test environments.
 
 When the user catalog exists, it is authoritative and is not merged with hidden
@@ -48,14 +49,14 @@ and implicit schema migration are rejected rather than interpreted.
 ## Commands
 
 ```powershell
-uv run wenyi-direct models path
-uv run wenyi-direct models list
-uv run wenyi-direct use translate deepseek-api deepseek-v4-flash
-uv run wenyi-direct use audit web2api gemini-3.1-pro
-uv run wenyi-direct use repair codex gpt-5.6-sol-high
+uv run kamyi models path
+uv run kamyi models list
+uv run kamyi use translate deepseek-api deepseek-v4-flash
+uv run kamyi use audit web2api gemini-3.1-pro
+uv run kamyi use repair codex gpt-5.6-sol-high
 
 # One run only; does not edit either YAML file.
-uv run wenyi-direct review book.epub --model audit=web2api/gemini-3.1-pro --model repair=codex/gpt-5.6-sol-high
+uv run kamyi review book.epub --model audit=web2api/gemini-3.1-pro --model repair=codex/gpt-5.6-sol-high
 ```
 
 `audit` changes both `factual_audit` and `chinese_audit`. Individual logical roles,
