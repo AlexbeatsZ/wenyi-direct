@@ -9,7 +9,14 @@ from rich.console import Console
 from rich.table import Table
 
 from .assemble.writer import assemble as assemble_document
-from .config import Config
+from .config import (
+    Config,
+    create_default_models_file,
+    expand_model_role,
+    load_model_registry,
+    resolve_models_path,
+    save_model_registry,
+)
 from .llm.factory import build_clients
 from .pipeline.direct import STAGE_NAMES, DirectPipeline, StageTaskError, export_json
 from .pipeline.knowledge import TerminologyStore, TermRule
@@ -19,12 +26,14 @@ from .validate import validate_epub
 
 app = typer.Typer(no_args_is_help=True, help="Chapter-first literary translation.")
 terms_app = typer.Typer(no_args_is_help=True, help="Manage terminology rules and groups.")
+models_app = typer.Typer(no_args_is_help=True, help="Manage the unified user model catalog.")
 app.add_typer(terms_app, name="terms")
+app.add_typer(models_app, name="models")
 console = Console()
 
 
-def _load(config_path: Path) -> Config:
-    return Config.load(config_path)
+def _load(config_path: Path, model_overrides: list[str] | None = None) -> Config:
+    return Config.load(config_path, model_overrides=model_overrides or ())
 
 
 def _store(config: Config, config_path: Path, source: Path) -> RunStore:
@@ -49,12 +58,87 @@ def _parse_chapters(value: str | None) -> set[int] | None:
 
 
 @app.command("init-config")
-def init_config(path: Path = typer.Argument(Path("config.yaml"))) -> None:
-    """Create a documented default configuration without overwriting an existing file."""
+def init_config(
+    path: Path = typer.Argument(Path("config.yaml")),
+    models: Path | None = typer.Option(None, "--models", help="Central models.yaml path."),
+) -> None:
+    """Create project settings and the central model catalog without overwriting either."""
     if Config.create_default_file(path):
         console.print(f"Created {path}")
     else:
         console.print(f"Already exists: {path}")
+    models_path = resolve_models_path(models)
+    if create_default_models_file(models_path):
+        console.print(f"Created {models_path}")
+    else:
+        console.print(f"Already exists: {models_path}")
+
+
+@models_app.command("path")
+def models_path(
+    models: Path | None = typer.Option(None, "--models", help="Central models.yaml path."),
+) -> None:
+    """Print the single user-level model catalog path."""
+    console.print(resolve_models_path(models))
+
+
+@models_app.command("init")
+def init_models(
+    models: Path | None = typer.Option(None, "--models", help="Central models.yaml path."),
+) -> None:
+    """Create the central model catalog without overwriting an existing one."""
+    target = resolve_models_path(models)
+    if create_default_models_file(target):
+        console.print(f"Created {target}")
+    else:
+        console.print(f"Already exists: {target}")
+
+
+@models_app.command("list")
+def list_models(
+    models: Path | None = typer.Option(None, "--models", help="Central models.yaml path."),
+) -> None:
+    """List named models and the stages currently routed to each one."""
+    registry = load_model_registry(models)
+    role_values = registry.roles.model_dump()
+    table = Table(title=f"Models: {resolve_models_path(models)}")
+    table.add_column("Name")
+    table.add_column("Transport")
+    table.add_column("Model")
+    table.add_column("Used by")
+    for name, provider in registry.providers.items():
+        strong = provider.tiers.get("strong")
+        used_by = [role.replace("_", "-") for role, selected in role_values.items() if selected == name]
+        table.add_row(
+            name,
+            provider.provider,
+            strong.model if strong and strong.model else "",
+            ", ".join(used_by),
+        )
+    console.print(table)
+
+
+@models_app.command("use")
+def use_model(
+    role: str = typer.Argument(..., help="Stage role or group: audit, repair, validation, all."),
+    name: str = typer.Argument(..., help="Named model from `models list`."),
+    models: Path | None = typer.Option(None, "--models", help="Central models.yaml path."),
+) -> None:
+    """Persist the default model for one logical role or role group."""
+    registry = load_model_registry(models)
+    if name not in registry.providers:
+        raise typer.BadParameter(f"unknown model {name!r}; run `wenyi-direct models list`")
+    try:
+        selected_roles = expand_model_role(role)
+    except ValueError as error:
+        raise typer.BadParameter(str(error), param_hint="role") from error
+    role_values = registry.roles.model_dump()
+    for selected_role in selected_roles:
+        role_values[selected_role] = name
+    updated = registry.model_copy(update={"roles": type(registry.roles).model_validate(role_values)})
+    target = save_model_registry(updated, models)
+    console.print(f"Updated {', '.join(item.replace('_', '-') for item in selected_roles)} -> {name}")
+    console.print(target)
 
 
 @app.command()
@@ -84,9 +168,15 @@ def translate(
         "--parallel",
         help="Overlap chapter N downstream review with chapter N+1 upstream work.",
     ),
+    model: list[str] | None = typer.Option(
+        None,
+        "--model",
+        "-m",
+        help="One-run ROLE=MODEL override; repeat for multiple roles.",
+    ),
 ) -> None:
     """Resume direct translation and all configured quality gates."""
-    cfg = _load(config)
+    cfg = _load(config, model)
     clients = build_clients(cfg)
     selected = _parse_chapters(chapters)
     with RichProgressDisplay(console) as progress:
@@ -119,9 +209,15 @@ def review(
         "--force",
         help="Open a new review generation even when Formal was reviewed already.",
     ),
+    model: list[str] | None = typer.Option(
+        None,
+        "--model",
+        "-m",
+        help="One-run ROLE=MODEL override; for example audit=deepseek_pro.",
+    ),
 ) -> None:
     """Re-audit existing Formal text through factual and Chinese-reader gates."""
-    cfg = _load(config)
+    cfg = _load(config, model)
     clients = build_clients(cfg)
     try:
         with RichProgressDisplay(console) as progress:
@@ -150,9 +246,15 @@ def stage(
         None,
         help="Optional indexes/ranges. Default runs only chapters ready for this stage.",
     ),
+    model: list[str] | None = typer.Option(
+        None,
+        "--model",
+        "-m",
+        help="One-run ROLE=MODEL override; repeat for stages that use repair and validation.",
+    ),
 ) -> None:
     """Run one persisted pipeline stage without continuing into later stages."""
-    cfg = _load(config)
+    cfg = _load(config, model)
     clients = build_clients(cfg)
     try:
         with RichProgressDisplay(console) as progress:

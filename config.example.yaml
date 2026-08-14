@@ -2,54 +2,9 @@ language:
   source: ja
   target: zh-CN
 
-providers:
-  sol:
-    provider: codex-cli
-    command: codex
-    timeout: 1200
-    tiers:
-      strong:
-        model: gpt-5.6-sol
-        options: {reasoning_effort: high}
-  # api:
-  #   provider: openai-compatible
-  #   base_url: https://example.invalid/v1
-  #   api_key_env: TRANSLATION_API_KEY
-  #   tiers:
-  #     strong: {model: vendor-model-name}
-  # messages_api:
-  #   provider: anthropic-compatible
-  #   base_url: https://api.anthropic.com
-  #   api_key_env: ANTHROPIC_API_KEY
-  #   tiers:
-  #     strong: {model: claude-sonnet-4-5}
-  # gemini:
-  #   provider: agy
-  #   command: agy
-  #   cwd: C:/path/to/dedicated/agy-runtime
-  #   isolate_user_config: true
-  #   tiers:
-  #     strong: {model: gemini-3.1-pro-high}
-# deepseek:
-#   provider: openai-compatible
-#   base_url: https://api.deepseek.com/v1
-#   api_key_env: DEEPSEEK_API_KEY
-#   reasoning_style: deepseek
-#   tiers:
-#     strong:
-#       model: deepseek-v4-pro
-#       options: {thinking: true, reasoning_effort: max}
-
-
-roles:
-  translate: sol
-  factual_audit: sol
-  chinese_audit: sol
-  repair: sol
-  validation: sol
-  # Optional: used after an explicit content-policy refusal, exhausted recognized
-  # transient/unavailable CLI failures, or repeated invalid JSON responses.
-  # content_policy_fallback: api
+# Provider/model definitions and default role routing are centralized in the user
+# models.yaml shown in models.example.yaml. Add `roles:` here only for a deliberate
+# project-specific exception.
 
 window:
   max_read_chars: 60000

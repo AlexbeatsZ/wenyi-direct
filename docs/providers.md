@@ -1,8 +1,15 @@
 # Provider configuration
 
 Logical roles (`translate`, `factual_audit`, `chinese_audit`, `repair`, and
-`validation`) refer to named providers. Multiple roles may share one constructed
-client, or use different transports.
+`validation`) refer to named model profiles. Multiple roles may share one constructed
+client, or use different transports. Profiles are normally defined once in the
+user-level catalog printed by `wenyi-direct models path`; project YAML may still
+define providers as a backward-compatible, self-contained override.
+
+Use `wenyi-direct models list` to inspect effective profiles,
+`wenyi-direct models use ROLE MODEL` to persist a default mapping, or repeat
+`--model ROLE=MODEL` on `translate`, `review`, and `stage` for one run only. See
+[design/model-configuration.md](design/model-configuration.md) for precedence.
 
 An optional `roles.content_policy_fallback` names one provider used when the
 selected stage provider raises an explicit content-policy refusal, or after a CLI

@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from wenyi_direct.cli import app
 from wenyi_direct.config import Config, WindowConfig
 from wenyi_direct.ingest.models import Chapter, Segment
 from wenyi_direct.pipeline.repair import RepairPlanner
@@ -93,3 +95,92 @@ def test_config_rejects_prompt_language_mismatch_and_invalid_window_budget() -> 
         )
     with pytest.raises(ValueError, match="cannot exceed"):
         WindowConfig(max_read_chars=10, max_write_chars=11)
+
+
+def test_sparse_project_config_uses_central_models_and_cli_overrides(tmp_path: Path) -> None:
+    models = tmp_path / "models.yaml"
+    models.write_text(
+        """providers:
+  first: {provider: fake}
+  second: {provider: fake}
+roles:
+  translate: first
+  factual_audit: first
+  chinese_audit: first
+  repair: first
+  validation: first
+""",
+        encoding="utf-8",
+    )
+    project = tmp_path / "project.yaml"
+    project.write_text("paths:\n  state_dir: work/state\n", encoding="utf-8")
+
+    config = Config.load(
+        project,
+        models_path=models,
+        model_overrides=["audit=second", "repair=second"],
+    )
+
+    assert config.roles.translate == "first"
+    assert config.roles.factual_audit == "second"
+    assert config.roles.chinese_audit == "second"
+    assert config.roles.repair == "second"
+    assert config.roles.validation == "first"
+
+
+def test_legacy_self_contained_config_does_not_inherit_central_roles(tmp_path: Path) -> None:
+    models = tmp_path / "models.yaml"
+    models.write_text(
+        """providers:
+  central: {provider: fake}
+roles:
+  translate: central
+  factual_audit: central
+  chinese_audit: central
+  repair: central
+  validation: central
+""",
+        encoding="utf-8",
+    )
+    project = tmp_path / "legacy.yaml"
+    project.write_text("providers:\n  default: {provider: fake}\n", encoding="utf-8")
+
+    config = Config.load(project, models_path=models)
+
+    assert config.roles.translate == "default"
+    assert config.roles.repair == "default"
+
+    overridden = Config.load(
+        project,
+        models_path=models,
+        model_overrides=["repair=central"],
+    )
+    assert overridden.roles.translate == "default"
+    assert overridden.roles.repair == "central"
+    assert set(overridden.providers) == {"default", "central"}
+
+
+def test_models_cli_persists_role_groups_in_one_catalog(tmp_path: Path) -> None:
+    models = tmp_path / "models.yaml"
+    runner = CliRunner()
+    initialized = runner.invoke(app, ["models", "init", "--models", str(models)])
+    assert initialized.exit_code == 0
+
+    switched = runner.invoke(
+        app,
+        ["models", "use", "audit", "deepseek_pro", "--models", str(models)],
+    )
+    assert switched.exit_code == 0
+    assert "factual-audit, chinese-audit -> deepseek_pro" in switched.output
+
+    project = tmp_path / "project.yaml"
+    project.write_text("language: {source: ja, target: zh-CN}\n", encoding="utf-8")
+    config = Config.load(project, models_path=models)
+    assert config.roles.factual_audit == "deepseek_pro"
+    assert config.roles.chinese_audit == "deepseek_pro"
+    assert config.roles.repair == "codex_sol"
+
+    listed = runner.invoke(app, ["models", "list", "--models", str(models)])
+    assert listed.exit_code == 0
+    assert "deepseek_pro" in listed.output
+    assert "codex_sol" in listed.output

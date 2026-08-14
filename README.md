@@ -38,8 +38,26 @@ current book's state rather than the shared terminology seed file.
 - `openai-compatible`: `/chat/completions` services
 - `anthropic-compatible`: Anthropic Messages-compatible `/v1/messages` services
 
-Each stage may use a different transport, or all stages may share one model. API
-keys are named by `api_key_env` in YAML and supplied through environment variables.
+Each stage may use a different transport, or all stages may share one model. Reusable
+connections and model parameters live once in the user-level `models.yaml`; project
+YAML only carries book-specific settings. API keys are named by `api_key_env` and
+supplied through environment variables.
+
+```powershell
+# Inspect and persistently switch the unified defaults.
+uv run wenyi-direct models path
+uv run wenyi-direct models list
+uv run wenyi-direct models use audit deepseek_pro
+uv run wenyi-direct models use repair codex_sol
+
+# Override selected roles for one invocation only.
+uv run wenyi-direct review path\to\book.epub --model audit=gemini_pro --model repair=codex_sol
+```
+
+`audit` is a shortcut for both factual and Chinese-reader audit roles. `translate`,
+`factual-audit`, `chinese-audit`, `repair`, `validation`, `fallback`, and `all` may
+also be selected directly. See
+[docs/design/model-configuration.md](docs/design/model-configuration.md).
 
 ## Independent stages and parallel execution
 
@@ -87,7 +105,8 @@ that overlap.
 ```powershell
 uv sync
 uv run wenyi-direct init-config config.yaml
-# edit config.yaml and set the referenced API-key environment variable if needed
+# edit the central models.yaml once, then keep config.yaml book-specific
+uv run wenyi-direct models list
 uv run wenyi-direct translate path\to\book.epub --config config.yaml
 uv run wenyi-direct translate path\to\book.epub --parallel --config config.yaml
 uv run wenyi-direct status path\to\book.epub --config config.yaml
