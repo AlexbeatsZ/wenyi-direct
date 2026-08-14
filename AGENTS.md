@@ -39,9 +39,10 @@ or atomic Formal promotion.
   parallel pair, chapter 72 factual batch 0 was persisted, but the same chapter 72
   response reached chapter 71's Chinese audit and failed its stable-ID boundary.
   Resume must use explicit CLI `--sequential`; `review` defaults to parallel.
-- Review roles (`factual_audit`, `chinese_audit`, `repair`, `validation`) now use
-  the `deepseek` provider (`deepseek-v4-pro`, max thinking); `translate` remains
-  on the `gemini_agy` gateway.
+- Review split: `factual_audit` and `chinese_audit` (problem finding) use the
+  `deepseek` provider (`deepseek-v4-pro`, max thinking); `repair` uses the
+  `default` codex-cli provider (gpt-5.6-sol); `validation` stays on `deepseek`;
+  `translate` remains on the `gemini_agy` gateway.
 - Codex's exact `You've hit your usage limit` response intentionally interrupts
   immediately without retry or fallback.
 - The abandoned `agent/stage-commands-and-staggered-pipeline` branch is not the
